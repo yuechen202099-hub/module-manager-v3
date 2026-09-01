@@ -66,6 +66,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_24_release.py",
     "scripts/verify_v3_2_25_release.py",
     "scripts/test_verify_v3_2_25_release.py",
+    "scripts/verify_v3_2_26_release.py",
+    "scripts/test_verify_v3_2_26_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -150,6 +152,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.23.md",
     "ops/releases/V3.2.24.md",
     "ops/releases/V3.2.25.md",
+    "ops/releases/V3.2.26.md",
 )
 
 REQUIRED_FILES = [
@@ -450,7 +453,8 @@ def label_suffix(value: str, label: str) -> str | None:
 def parse_known_label_value(value: str, labels: dict[str, str]) -> tuple[str, str] | None:
     for label in sorted(labels, key=lambda item: len(compact_label(item)), reverse=True):
         suffix = label_suffix(value, label)
-        if suffix is None or not suffix or is_label_character(suffix[0]):
+        trimmed_suffix = suffix.lstrip() if suffix is not None else ""
+        if suffix is None or not trimmed_suffix or is_label_character(trimmed_suffix[0]):
             continue
         parsed_value = strip_decorative_prefix(suffix).strip()
         if parsed_value:
@@ -1159,6 +1163,15 @@ def verified_v3224_attested_baseline_is_documented(record: str, version: str) ->
     return True
 
 
+def verified_v3225_attested_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.25":
+        return False
+    expected_sha256 = "74e8bafeaf919e57cd012f6f0f01753979231bb446a99265c5ec2185ad83de10"
+    if hashlib.sha256(record.encode("utf-8")).hexdigest() != expected_sha256:
+        fail("V3.2.25 attested baseline record must remain byte-identical to its production proof")
+    return True
+
+
 def release_record_matches_lifecycle_state(
     record: str,
     version: str,
@@ -1167,6 +1180,8 @@ def release_record_matches_lifecycle_state(
     candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
+        if verified_v3225_attested_baseline_is_documented(record, version):
+            return
         if verified_v3224_attested_baseline_is_documented(record, version):
             return
         if verified_v3223_attested_baseline_is_documented(record, version):
@@ -1258,7 +1273,10 @@ def verify_current_release_phase(
     expected_source_commit: str | None = None,
 ) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
-    if candidate == "V3.2.25":
+    if candidate == "V3.2.26":
+        path = Path(__file__).with_name("verify_v3_2_26_release.py")
+        module_name = "verify_v3_2_26_release"
+    elif candidate == "V3.2.25":
         path = Path(__file__).with_name("verify_v3_2_25_release.py")
         module_name = "verify_v3_2_25_release"
     elif candidate == "V3.2.24":
@@ -1315,7 +1333,7 @@ def verify_current_release_phase(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     verifier_args = ["--phase", phase]
-    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21", "V3.2.22", "V3.2.23", "V3.2.24", "V3.2.25"}:
+    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21", "V3.2.22", "V3.2.23", "V3.2.24", "V3.2.25", "V3.2.26"}:
         if package_path is not None:
             verifier_args.extend(("--package", str(package_path)))
         if expected_source_commit is not None:

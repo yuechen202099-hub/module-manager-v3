@@ -13,6 +13,13 @@ from app.services.barcode_verification_contract import has_current_eligible_phot
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
 MANUAL_CLASSIFICATION_BARCODE_READY = {"passed", "manual", "manual_confirmed", "manual_passed"}
 DASHBOARD_IGNORED_EXCEPTION_REASON = "missing_collector_photo"
+DASHBOARD_IGNORED_EXCEPTION_REASONS = frozenset(
+    {
+        DASHBOARD_IGNORED_EXCEPTION_REASON,
+        "missing_collector_info",
+        "缺少采集器信息",
+    }
+)
 ANOMALY_RESOLUTIONS_KEY = "data_center_anomaly_resolutions"
 
 
@@ -58,7 +65,7 @@ def is_only_missing_collector_photo_exception(group: Mapping[str, Any]) -> bool:
     if not isinstance(raw_reasons, list):
         return False
     reasons = {str(item).strip() for item in raw_reasons if str(item).strip()}
-    return reasons == {DASHBOARD_IGNORED_EXCEPTION_REASON}
+    return bool(reasons) and reasons.issubset(DASHBOARD_IGNORED_EXCEPTION_REASONS)
 
 
 def effective_collector(group: Mapping[str, Any]) -> str:
@@ -110,7 +117,6 @@ def manual_classification_snapshot(
         (group.get("terminal"), "terminal_missing"),
         (group.get("meter_no"), "meter_missing"),
         (effective_module_asset_no(group), "module_missing"),
-        (effective_collector(group), "collector_missing"),
         (group.get("address"), "address_missing"),
     ):
         if not str(value or "").strip():
@@ -211,7 +217,21 @@ def rebind_anomaly_resolutions(
 def group_anomalies(group: Mapping[str, Any]) -> list[dict[str, str]]:
     photos = active_photos(group)
     _snapshot, manual_codes = manual_classification_snapshot(group, photos)
-    if is_only_missing_collector_photo_exception(group):
+    _barcode_status, missing_fields, _progress = barcode_status_from_group(group)
+    normalized_missing_fields = {str(field).strip() for field in missing_fields if str(field).strip()}
+    collector_photo_present = any(
+        str(photo.get("category") or photo.get("construction_slot") or "").strip() == "collector_barcode"
+        for photo in photos
+    )
+    collector_only_exception = is_only_missing_collector_photo_exception(group)
+    collector_evidence_gap = not effective_collector(group) or not collector_photo_present
+    collector_only_gap = collector_evidence_gap and (
+        normalized_missing_fields == {"collector"}
+        or (collector_only_exception and normalized_missing_fields.issubset({"collector"}))
+    )
+    if collector_only_gap:
+        manual_codes = [code for code in manual_codes if code != "barcode_verification_required"]
+    if collector_only_exception:
         manual_codes = [code for code in manual_codes if code != "exception_open"]
 
     messages: dict[str, str] = {}
@@ -227,18 +247,17 @@ def group_anomalies(group: Mapping[str, Any]) -> list[dict[str, str]]:
         if message:
             messages.setdefault(code, message)
 
-    _barcode_status, missing_fields, _progress = barcode_status_from_group(group)
     for field, code in (
         ("meter", "meter_barcode_mismatch"),
         ("module", "module_barcode_mismatch"),
         ("collector", "collector_barcode_mismatch"),
     ):
-        if field in missing_fields:
+        if field in normalized_missing_fields and not (field == "collector" and collector_only_gap):
             messages.setdefault(code, ANOMALY_MESSAGES[code])
 
     for raw_reason in group.get("exception_reasons") or []:
         reason = str(raw_reason or "").strip()
-        if not reason or reason == DASHBOARD_IGNORED_EXCEPTION_REASON:
+        if not reason or reason in DASHBOARD_IGNORED_EXCEPTION_REASONS:
             continue
         known = EXCEPTION_REASON_ANOMALIES.get(reason)
         if known:

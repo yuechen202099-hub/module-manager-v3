@@ -1127,14 +1127,14 @@ def test_auto_archive_rejects_nonpassing_verification_states(
     assert group["status"] == "unreviewed"
 
 
-def test_auto_archive_ignores_stale_missing_collector_photo_only_exception() -> None:
+def test_auto_archive_ignores_stale_collector_missing_exceptions() -> None:
     from app.services import barcode_maintenance_worker as worker
 
     group = eligible_group("stale-missing-collector-photo", verification_status="passed")
     group.update(
         status="exception",
         exception_note="缺采集器照片",
-        exception_reasons=["missing_collector_photo"],
+        exception_reasons=["missing_collector_photo", "缺少采集器信息"],
         has_archive_blocker=True,
     )
 
@@ -2131,41 +2131,21 @@ def test_postgres_verification_enqueue_batch_is_bounded_and_bulk_preloads(
     assert "group_id IN" in statements[2]
 
 
-def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
+def test_deployment_runs_api_unprivileged_and_retires_background_barcode() -> None:
     root = Path(__file__).resolve().parents[2]
     api_unit = (root / "infra" / "module-manager-v2.service").read_text(encoding="utf-8")
-    worker_unit = (root / "infra" / "module-manager-v2-photo-barcode-maintenance.service").read_text(encoding="utf-8")
-    enqueue_unit = (root / "infra" / "module-manager-v2-photo-barcode-maintenance-enqueue.service").read_text(encoding="utf-8")
-    timer = (root / "infra" / "module-manager-v2-photo-barcode-maintenance.timer").read_text(encoding="utf-8")
-    runner = (root / "scripts" / "run_photo_barcode_maintenance_slice.sh").read_text(encoding="utf-8")
     runbook = (root / "docs" / "sop" / "06-production-deploy-runbook.md").read_text(encoding="utf-8")
     rollback = (root / "docs" / "sop" / "07-rollback-and-incident-review.md").read_text(encoding="utf-8")
 
-    for unit in (api_unit, worker_unit, enqueue_unit):
-        assert "User=modulemgr" in unit
-        assert "Group=modulemgr" in unit
-        assert "UMask=0077" in unit
-        assert "EnvironmentFile=/opt/module-manager-v2/.env" in unit
+    assert "User=modulemgr" in api_unit
+    assert "Group=modulemgr" in api_unit
+    assert "UMask=0077" in api_unit
+    assert "EnvironmentFile=/opt/module-manager-v2/.env" in api_unit
     assert "WorkingDirectory=/opt/module-manager-v2/current/v2-api" in api_unit
     assert "ExecStart=/opt/module-manager-v2/venv/bin/uvicorn" in api_unit
 
-    assert "Type=simple" in worker_unit
-    assert "BARCODE_MAINTENANCE_BATCH_SIZE=20" in worker_unit
-    assert "BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS=5" in worker_unit
-    assert "BARCODE_MAINTENANCE_START_PAUSED" not in worker_unit
-    assert "BARCODE_MAINTENANCE_START_PAUSED" not in runner
-    assert "Nice=19" in worker_unit
-    assert "IOSchedulingClass=idle" in worker_unit
-    assert "CPUQuota=20%" in worker_unit
-    assert "MemoryMax=512M" in worker_unit
-    assert "OnCalendar=*-*-* 00:00:00" in timer
-    assert "Unit=module-manager-v2-photo-barcode-maintenance-enqueue.service" in timer
-    assert "--enqueue" in enqueue_unit
-    assert "--serve" in runner
-    assert "recompute_photo_barcode_checks.py" not in runner
     assert "alembic upgrade head" in runbook
     assert "20260824_0016" in runbook
-    assert "module-manager-v2-photo-barcode-maintenance-enqueue.service" in runbook
     assert "id -u modulemgr" in runbook
     assert "useradd --system" in runbook
     assert "chown -R modulemgr:modulemgr" in runbook
@@ -2187,21 +2167,50 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     env_index = runbook.index('. "$APP/.env"')
     migration_index = runbook.index("alembic upgrade head")
     assert env_index < migration_index
-    health_index = runbook.index("production_health_check.py")
-    resume_index = runbook.index('set_maintenance_paused(False, "production-deploy")')
-    assert health_index < resume_index
-    assert "systemctl is-active module-manager-v2-photo-barcode-maintenance.service" in runbook
-    assert "systemctl is-active module-manager-v2-photo-barcode-maintenance.timer" in runbook
-    stop_worker_index = runbook.index("systemctl stop module-manager-v2-photo-barcode-maintenance.service")
-    stop_timer_index = runbook.index("systemctl stop module-manager-v2-photo-barcode-maintenance.timer")
     switch_index = runbook.index('ln -sfn "$REL" "$APP/current"')
-    assert stop_worker_index < switch_index
-    assert stop_timer_index < switch_index
+    retired_units = (
+        "module-manager-v2-photo-barcode-maintenance.service",
+        "module-manager-v2-photo-barcode-maintenance-enqueue.service",
+        "module-manager-v2-photo-barcode-maintenance.timer",
+    )
+    generic_disable = 'systemctl disable --now "$unit"'
+    assert runbook.index(generic_disable) < switch_index
+    assert generic_disable in rollback
+    assert f"{generic_disable} 2>/dev/null || true" not in runbook
+    assert f"{generic_disable} 2>/dev/null || true" not in rollback
+    for unit in retired_units:
+        assert unit in runbook
+        assert unit in rollback
+        assert f"/etc/systemd/system/{unit}" in runbook
+        assert f"/etc/systemd/system/{unit}" in rollback
+        assert f'systemctl enable {unit}' not in runbook
+        assert f'systemctl start {unit}' not in runbook
+        assert f'$REL/infra/{unit}' not in runbook
 
-    rollback_stop_worker = rollback.index("systemctl stop module-manager-v2-photo-barcode-maintenance.service")
-    rollback_stop_timer = rollback.index("systemctl stop module-manager-v2-photo-barcode-maintenance.timer")
+    retirement_checks = [
+        match.start()
+        for match in re.finditer(r'assert_retired_unit "\$(?:UNIT|unit)"', runbook[:migration_index])
+    ]
+    daemon_reload = runbook.index("systemctl daemon-reload")
+    assert len(retirement_checks) >= 3
+    assert daemon_reload < retirement_checks[-1] < migration_index < switch_index
+    assert 'if [ -L "$APP/current" ]; then' in deploy_block
+    assert 'if ! PREVIOUS=$(readlink -f -- "$APP/current"); then' in deploy_block
+    assert 'validate_release_directory "$PREVIOUS"' in deploy_block
+    assert "rollback_cutover" in deploy_block
+    deploy_switch = deploy_block.index('ln -sfn "$REL" "$APP/current"')
+    readiness_call = deploy_block.rindex("wait_for_uvicorn")
+    health_call = deploy_block.rindex("production_health_check.py")
+    assert deploy_switch < readiness_call < health_call
+
     rollback_switch = rollback.index('ln -sfn "$PREVIOUS" "$APP/current"')
-    rollback_health = rollback.index("curl -fsS http://127.0.0.1/health")
-    assert rollback_stop_worker < rollback_switch
-    assert rollback_stop_timer < rollback_switch
-    assert rollback_switch < rollback_health
+    rollback_health = rollback.rindex("production_health_check.py")
+    rollback_readiness = rollback.rindex("wait_for_uvicorn")
+    for unit in retired_units:
+        assert rollback.index(unit) < rollback_switch
+    assert rollback.index('assert_retired_unit "$UNIT"') < rollback_switch
+    assert 'if ! PREVIOUS=$(readlink -f -- "$PREVIOUS"); then' in rollback
+    assert 'validate_release_directory "$PREVIOUS"' in rollback
+    assert 'if ! RESTORED=$(readlink -f -- "$APP/current"); then' in rollback
+    assert '[ "$RESTORED" = "$PREVIOUS" ]' in rollback
+    assert rollback_switch < rollback_readiness < rollback_health

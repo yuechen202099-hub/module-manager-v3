@@ -1256,6 +1256,63 @@ def test_postgres_approved_review_closes_resolved_exception_state_and_keeps_hist
     assert all(item["status"] == "resolved" for item in repository.data_center_service.group_anomalies(payload()))
 
 
+def test_postgres_approval_is_not_blocked_by_collector_only_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches PostgreSQL approval requiring confirmation for a retired collector-only gap."""
+    group, base_payload = _postgres_exception_review_fixture(resolved=False)
+    group.exception_note = "缺少采集器信息"
+    group.exception_reasons = ["missing_collector_info"]
+
+    def payload():
+        value = base_payload()
+        value.update(
+            {
+                "collector": "",
+                "construction_collector": "",
+                "barcode_verification": {
+                    "status": "mismatch",
+                    "result": {
+                        "matched_fields": ["meter", "module"],
+                        "missing_fields": ["collector"],
+                    },
+                },
+            }
+        )
+        return value
+
+    class Session:
+        committed = False
+
+        def commit(self):
+            self.committed = True
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, checked_session, group_id: str, *, lock: bool = False):
+            assert checked_session is session
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group: payload())
+
+    reviewed = ReviewRepository().review_group(group.legacy_id, "approved", "module_admin")
+
+    assert session.committed is True
+    assert reviewed["status"] == "approved"
+    assert group.exception_status in {None, ""}
+    assert group.has_archive_blocker is False
+    assert repository.data_center_service.group_anomalies(payload()) == []
+
+
 def test_postgres_approved_review_rejects_unconfirmed_current_anomaly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8031,7 +8088,10 @@ def test_postgres_installer_workload_uses_material_group_installation_address() 
     ("reasons", "expected_exception_count", "expected_unreviewed_count"),
     [
         (["missing_collector_photo"], 0, 1),
+        (["缺少采集器信息"], 0, 1),
+        (["missing_collector_photo", "缺少采集器信息"], 0, 1),
         (["missing_collector_photo", "missing_module_asset_no"], 1, 0),
+        (["missing_collector_photo", "缺少采集器信息", "missing_module_asset_no"], 1, 0),
     ],
 )
 def test_postgres_installer_workload_ignores_only_missing_collector_photo_exception(
@@ -8391,7 +8451,8 @@ def test_postgres_quality_status_clears_stale_missing_collector_photo_exception(
     assert group.raw_data["exception_reasons"] == []
 
 
-def test_postgres_exception_listing_revalidates_stale_missing_module_note() -> None:
+def test_postgres_exception_listing_is_read_only_for_stale_missing_module_note() -> None:
+    """Catches a GET/list projection repairing and committing production records as a side effect."""
     def photo(slot: str, asset_no: str = ""):
         return SimpleNamespace(
             id=f"photo-{slot}",
@@ -8510,12 +8571,12 @@ def test_postgres_exception_listing_revalidates_stale_missing_module_note() -> N
 
     result = TestPostgresRepository().list_exception_groups(limit=100, offset=0)
 
-    assert result["total"] == 0
-    assert result["items"] == []
-    assert group.exception_note == ""
-    assert group.raw_data["exception_note"] == ""
-    assert group.status == repository.GroupStatus.UNREVIEWED
-    assert fake_session.committed is True
+    assert result["total"] == 1
+    assert [item["id"] for item in result["items"]] == ["g-stale-module"]
+    assert group.exception_note == "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"
+    assert group.raw_data["exception_note"] == "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"
+    assert group.status == repository.GroupStatus.REJECTED
+    assert fake_session.committed is False
 
 
 def test_postgres_exception_listing_preserves_manual_exception_note() -> None:
@@ -8769,7 +8830,7 @@ def test_postgres_summary_uses_lightweight_barcode_accuracy_queries(monkeypatch:
     assert "count(photos.id)" in compiled.lower()
 
 
-def test_postgres_dashboard_exception_clause_excludes_only_missing_collector_photo() -> None:
+def test_postgres_dashboard_exception_clause_excludes_only_collector_missing_reasons() -> None:
     compiled = str(
         repository.select(repository._dashboard_exception_clause()).compile(
             dialect=postgresql.dialect(),
@@ -8777,28 +8838,30 @@ def test_postgres_dashboard_exception_clause_excludes_only_missing_collector_pho
         )
     )
 
-    assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
-    assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
+    assert "jsonb_array_length(material_groups.exception_reasons) > 0" in compiled
+    assert "material_groups.exception_reasons <@" in compiled
+    assert "missing_collector_photo" in compiled
+    assert "missing_collector_info" in compiled
     assert "material_groups.status != 'approved'" in compiled
 
 
-def test_postgres_problem_group_ignores_only_missing_collector_photo_exception() -> None:
+def test_postgres_problem_group_ignores_collector_missing_reasons_but_keeps_real_exceptions() -> None:
     collector_only = {
         "status": "exception",
         "photo_count": 3,
         "has_archive_blocker": True,
-        "exception_reasons": ["missing_collector_photo"],
+        "exception_reasons": ["missing_collector_photo", "缺少采集器信息"],
     }
     mixed = {
         **collector_only,
-        "exception_reasons": ["missing_collector_photo", "missing_module_asset_no"],
+        "exception_reasons": ["missing_collector_photo", "缺少采集器信息", "missing_module_asset_no"],
     }
 
     assert repository._is_problem_group(collector_only) is False
     assert repository._is_problem_group(mixed) is True
 
 
-def test_postgres_review_queue_status_ignores_only_missing_collector_photo_exception() -> None:
+def test_postgres_review_queue_status_ignores_only_collector_missing_reasons() -> None:
     compiled = str(
         repository.select(repository._review_queue_status_expression()).compile(
             dialect=postgresql.dialect(),
@@ -8806,11 +8869,12 @@ def test_postgres_review_queue_status_ignores_only_missing_collector_photo_excep
         )
     )
 
-    assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
-    assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
+    assert "jsonb_array_length(material_groups.exception_reasons) > 0" in compiled
+    assert "material_groups.exception_reasons <@" in compiled
+    assert "missing_collector_info" in compiled
 
 
-def test_postgres_exception_listing_ignores_only_missing_collector_photo_exception(
+def test_postgres_exception_listing_ignores_only_collector_missing_reasons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[object] = []
@@ -8847,8 +8911,23 @@ def test_postgres_exception_listing_ignores_only_missing_collector_photo_excepti
         )
     )
 
-    assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
-    assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
+    assert "jsonb_array_length(material_groups.exception_reasons) > 0" in compiled
+    assert "material_groups.exception_reasons <@" in compiled
+    assert "missing_collector_info" in compiled
+
+
+def test_postgres_archive_validation_does_not_generate_missing_collector_info() -> None:
+    group = {
+        "id": "group-1",
+        "module_asset_no": "MOD-001",
+        "photos": [
+            {"category": "before_box", "collector": ""},
+            {"category": "module_meter", "collector": "", "module_asset_no": "MOD-001"},
+            {"category": "after_box", "collector": ""},
+        ],
+    }
+
+    assert repository._validate_group_archive_with_module_map(group, {}) == []
 
 
 def test_group_barcode_accuracy_summary_uses_durable_rows_and_skips_legacy_recomputation(

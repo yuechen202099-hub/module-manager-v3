@@ -353,77 +353,24 @@ def test_production_group_create_rejects_placeholder_formal_identity(monkeypatch
     assert repository.calls == []
 
 
-def test_barcode_maintenance_routes_are_admin_only_and_never_run_recognition(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    from app.api.routes import barcode_maintenance
-    from app.services import barcode_maintenance_worker
-
+def test_barcode_maintenance_routes_are_retired_for_every_role(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
-    calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(
-        barcode_maintenance_worker,
-        "scan_group_evidence",
-        lambda *_args, **_kwargs: pytest.fail("admin API must not execute recognition"),
-    )
-    monkeypatch.setattr(
-        barcode_maintenance,
-        "maintenance_status",
-        lambda: {"paused": True, "verification_pending": 2, "delivery_cache_pending": 1},
-    )
-    monkeypatch.setattr(
-        barcode_maintenance,
-        "set_maintenance_paused",
-        lambda paused, actor: calls.append(("paused", paused, actor)) or {"paused": paused},
-    )
-    monkeypatch.setattr(
-        barcode_maintenance,
-        "enqueue_verification_jobs",
-        lambda group_ids, actor: calls.append(("enqueue", tuple(group_ids), actor))
-        or {"enqueued": len(group_ids)},
+    requests = (
+        ("GET", "/barcode-maintenance/status", None),
+        ("POST", "/barcode-maintenance/pause", None),
+        ("POST", "/barcode-maintenance/resume", None),
+        ("POST", "/barcode-maintenance/enqueue", {"group_ids": ["group-1"]}),
     )
 
-    assert production_client.get("/barcode-maintenance/status", headers=headers["reviewer"]).status_code == 403
-    status = production_client.get("/barcode-maintenance/status", headers=headers["admin"])
-    paused = production_client.post("/barcode-maintenance/pause", headers=headers["admin"])
-    resumed = production_client.post("/barcode-maintenance/resume", headers=headers["admin"])
-    enqueued = production_client.post(
-        "/barcode-maintenance/enqueue",
-        headers=headers["admin"],
-        json={"group_ids": ["group-1", "group-2"]},
-    )
-
-    assert status.status_code == 200
-    assert status.json()["data"]["paused"] is True
-    assert paused.status_code == 200
-    assert resumed.status_code == 200
-    assert enqueued.status_code == 200
-    assert enqueued.json()["data"]["enqueued"] == 2
-    assert calls == [
-        ("paused", True, "root-admin"),
-        ("paused", False, "root-admin"),
-        ("enqueue", ("group-1", "group-2"), "root-admin"),
-    ]
-
-
-def test_barcode_maintenance_route_fails_closed_when_backend_is_unavailable(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    from app.api.routes import barcode_maintenance
-
-    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        barcode_maintenance,
-        "maintenance_status",
-        lambda: (_ for _ in ()).throw(state_repository.StateBackendNotReady("backend unavailable")),
-    )
-
-    response = production_client.get("/barcode-maintenance/status", headers=headers["admin"])
-
-    assert response.status_code == 503
-    assert "backend unavailable" in response.text
+    for request_headers in ({}, headers["reviewer"], headers["admin"]):
+        for method, path, body in requests:
+            response = production_client.request(
+                method,
+                path,
+                headers=request_headers,
+                json=body,
+            )
+            assert response.status_code == 404
 
 
 def test_production_legacy_unmatched_mutations_require_admin(monkeypatch, tmp_path) -> None:
@@ -3479,7 +3426,7 @@ def test_system_status_version_requires_admin_and_reports_runtime_state() -> Non
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.2.25"
+    assert data["version"] == "3.2.26"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]

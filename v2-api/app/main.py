@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
     production_mode = settings.app_env.lower() in {"prod", "production"}
     app = FastAPI(
         title="Module Manager V2 API",
-        version="3.2.25",
+        version="3.2.26",
         lifespan=lifespan,
         docs_url=None if production_mode else "/docs",
         redoc_url=None if production_mode else "/redoc",
@@ -90,7 +90,6 @@ def create_app() -> FastAPI:
         "/exports",
         "/jobs",
         "/ezcodes",
-        "/barcode-maintenance",
         "/collector-transfer",
     )
 

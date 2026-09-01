@@ -5,12 +5,12 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.2.25`
-- 当前生产应用基线：`V3.2.24`
-- 当前发布候选版本：`V3.2.25`
-- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.24-20260831T133027Z`
-- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.23-20260830T225639Z`
-- 当前生产提交：`f611d9b90fcee4fa82519a9cd83edaa17eb39664`
+- 生产维护分支：`production/V3/3.2.26`
+- 当前生产应用基线：`V3.2.25`
+- 当前发布候选版本：`V3.2.26`
+- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.25-20260831T224124Z`
+- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.24-20260831T133027Z`
+- 当前生产提交：`ddfd09301612c5c278a1b7652a9be483f729d0cf`
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.2.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\v3.2.21-bulk-anomaly-approval`
 - worktree 目录名是创建时用途标识，不代表当前线上版本；以本节的分支、候选版本和生产 release 为准。
@@ -33,8 +33,8 @@
 - 总清单短表号匹配键：去掉前 2 位。
 - 资料组异常时绝不能生成或展示 `00000000` 兜底工单；扫到不在工单中的任务应提示无工单。
 - 自动上传目前按用户要求关闭；不要擅自恢复。
-- 只有 4 张照片完整的资料组才做后台条码/二维码/OCR 扫描。
-- 图片扫码判断在后台静默低速执行，不在前台同步计算；低性能服务器按小批次串行处理。
+- 后台定时条码/二维码/OCR 扫描、自动入队、维护 worker 及 `/barcode-maintenance/*` 管理接口已按用户要求退役，不得恢复。
+- 施工端即时扫码、采集器盘点人工扫码、审阅页手工框选扫码继续保留；历史识别结果和数据库记录继续可读。
 
 ## 项目结构
 
@@ -74,7 +74,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.25 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.26 --phase source
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
 ```
@@ -108,6 +108,6 @@ git diff --cached --name-only
 - 生产线以线上稳定为最高优先级，不混入开发环境 `3.0.56` 之类内容。
 - 数据中台、项目驾驶舱、任务领取页和施工采集页是当前高频维护页面；导出中心已退休，不得恢复旧入口。
 - reviewer-only 角色保持下线；管理员审阅能力与终端翻拍统一收口到 `/review-workbench`，施工员仍只能访问 `/construction`。
-- 图片扫码准确率、人工确认、分类完成状态、自动归档和后台慢速维护任务是当前重点链路。
+- 图片人工扫码准确率、人工确认、分类完成状态和归档是当前重点链路；不得重新引入后台自动扫码任务。
 - 登录有效期为当天有效；过期后任何操作应跳转登录页。
 - 任务领取页进度 100% 后按钮应显示 `已施工` / `已审阅` 且不可用。

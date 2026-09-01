@@ -5014,8 +5014,6 @@ def validate_group_archive(group: dict[str, Any]) -> list[str]:
     has_required_construction_slots = CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
     if len(photos) < 4 and not has_required_construction_slots:
         reasons.append("资料组照片不足 4 张")
-    if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
-        reasons.append("缺少采集器信息")
     module_asset_values = group_module_asset_values(group)
     if photos and not module_asset_values:
         reasons.append("缺少模块资产编号")

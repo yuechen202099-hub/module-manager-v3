@@ -168,6 +168,74 @@ def test_data_center_anomalies_are_chinese_specific_and_ignore_missing_collector
     assert all(len(item["evidence_fingerprint"]) == 64 for item in anomalies)
 
 
+@pytest.mark.parametrize(
+    "barcode_verification",
+    [
+        {
+            "status": "mismatch",
+            "evidence_version": 8,
+            "meter_matched": True,
+            "module_matched": True,
+            "collector_matched": False,
+            "result": {
+                "passed_count": 2,
+                "matched_fields": ["meter", "module"],
+                "missing_fields": ["collector"],
+            },
+        },
+        {},
+    ],
+)
+def test_collector_only_gap_creates_no_open_data_center_anomaly(
+    barcode_verification: dict,
+) -> None:
+    """Catches a missing collector number/photo being reintroduced as an approval blocker."""
+    group = deepcopy(_review_state("collector-gap-team")["groups"][0])
+    group.update(
+        {
+            "collector": "",
+            "construction_collector": "",
+            "exception_status": "open",
+            "exception_reasons": ["missing_collector_info"],
+            "has_archive_blocker": True,
+            "barcode_verification": barcode_verification,
+        }
+    )
+
+    assert data_center_service.group_anomalies(group) == []
+
+
+def test_json_approval_is_not_blocked_by_collector_only_gap(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches the JSON approval path requiring confirmation for a retired collector-only gap."""
+    group = _latest_group()
+    group.update(
+        {
+            "status": "incomplete",
+            "collector": "",
+            "construction_collector": "",
+            "exception_status": "open",
+            "exception_note": "缺少采集器信息",
+            "exception_reasons": ["缺少采集器信息"],
+            "has_archive_blocker": True,
+            "barcode_verification": {
+                "status": "mismatch",
+                "result": {
+                    "matched_fields": ["meter", "module"],
+                    "missing_fields": ["collector"],
+                },
+            },
+        }
+    )
+
+    reviewed = json_review_repo.review_group("g-1", "approved", "module_admin")
+
+    assert reviewed["status"] == "approved"
+    assert reviewed["exception_status"] == ""
+    assert data_center_service.group_anomalies(reviewed) == []
+
+
 def test_approved_group_exits_current_exception_while_resolved_history_is_preserved() -> None:
     group = deepcopy(_review_state("approved-exception-team")["groups"][0])
     group.update(
@@ -1253,16 +1321,27 @@ def test_data_center_exception_none_filter_returns_no_exception_rows(
     assert page["items"][0]["exception_status"] == ""
 
 
-def test_data_center_exception_drilldown_ignores_only_missing_collector_photo() -> None:
+@pytest.mark.parametrize(
+    "ignored_reasons",
+    [
+        ["missing_collector_photo"],
+        ["missing_collector_info"],
+        ["缺少采集器信息"],
+        ["missing_collector_photo", "缺少采集器信息"],
+    ],
+)
+def test_data_center_exception_drilldown_ignores_collector_missing_reasons(
+    ignored_reasons: list[str],
+) -> None:
     collector_only = {
         "status": "exception",
         "exception_status": "open",
         "has_archive_blocker": True,
-        "exception_reasons": ["missing_collector_photo"],
+        "exception_reasons": ignored_reasons,
     }
     mixed = {
         **collector_only,
-        "exception_reasons": ["missing_collector_photo", "missing_module_asset_no"],
+        "exception_reasons": [*ignored_reasons, "missing_module_asset_no"],
     }
 
     assert data_center_service.exception_status_from_group(collector_only) == ""

@@ -3556,7 +3556,7 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
     assert candidate["terminal_key"] != "MIXED-001"
 
 
-def test_review_workbench_ignores_stale_missing_collector_photo_exception(
+def test_review_workbench_ignores_stale_collector_missing_exceptions(
     db_session: Session,
 ) -> None:
     """Catches a retired collector-photo-only exception blocking review and re-photo."""
@@ -3572,13 +3572,13 @@ def test_review_workbench_ignores_stale_missing_collector_photo_exception(
     )
     group.exception_status = "open"
     group.exception_note = "缺采集器照片"
-    group.exception_reasons = ["missing_collector_photo"]
+    group.exception_reasons = ["missing_collector_photo", "缺少采集器信息"]
     group.has_archive_blocker = True
     group.raw_data = {
         **dict(group.raw_data or {}),
         "status": "exception",
         "exception_note": "缺采集器照片",
-        "exception_reasons": ["missing_collector_photo"],
+        "exception_reasons": ["missing_collector_photo", "缺少采集器信息"],
     }
     db_session.commit()
 

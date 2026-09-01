@@ -1130,16 +1130,16 @@ def test_problem_group_is_not_counted_again_as_missing_photo(synthetic_state: di
     assert synthetic_state["summary"]["scanned_groups"] == 2
 
 
-def test_problem_group_ignores_only_missing_collector_photo_exception() -> None:
+def test_problem_group_ignores_all_collector_missing_reasons_but_keeps_real_exceptions() -> None:
     collector_only = {
         "status": "exception",
         "photo_count": 3,
         "has_archive_blocker": True,
-        "exception_reasons": ["missing_collector_photo"],
+        "exception_reasons": ["missing_collector_photo", "缺少采集器信息"],
     }
     mixed = {
         **collector_only,
-        "exception_reasons": ["missing_collector_photo", "缺少采集器信息"],
+        "exception_reasons": ["missing_collector_photo", "缺少采集器信息", "missing_module_asset_no"],
     }
 
     assert local_simulation.is_problem_group(collector_only) is False
@@ -5293,7 +5293,8 @@ def test_archive_blocks_duplicate_module_and_missing_required_scan_fields(synthe
     assert duplicate_group["status"] == "exception"
     assert "模块号重复" in duplicate_group["exception_note"]
     assert missing_group["status"] == "exception"
-    assert "缺少采集器信息" in missing_group["exception_note"]
+    assert "模块号重复" in missing_group["exception_note"]
+    assert "缺少采集器信息" not in missing_group["exception_note"]
 
     clear_scan_data()
     apply_synced_scan_records(

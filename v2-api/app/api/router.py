@@ -1,10 +1,9 @@
 from fastapi import APIRouter
 
-from app.api.routes import auth, barcode_maintenance, catalog, collector_transfer, ezcodes, groups, jobs, local_test, miniprogram, projects, scan, tasks
+from app.api.routes import auth, catalog, collector_transfer, ezcodes, groups, jobs, local_test, miniprogram, projects, scan, tasks
 
 api_router = APIRouter()
 api_router.include_router(auth.router, tags=["auth"])
-api_router.include_router(barcode_maintenance.router, tags=["barcode-maintenance"])
 api_router.include_router(collector_transfer.router, tags=["collector-transfer"])
 api_router.include_router(projects.router, tags=["projects"])
 api_router.include_router(catalog.router, tags=["catalog"])

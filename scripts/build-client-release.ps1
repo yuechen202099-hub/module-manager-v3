@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.25",
+    [string]$Version = "3.2.26",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -9,13 +9,13 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw "Release Version must be a semantic version such as 3.0.84."
 }
-$requiredVersion = "3.2.25"
-$protectedHistoricalVersion = "3.2.24"
+$requiredVersion = "3.2.26"
+$protectedHistoricalVersion = "3.2.25"
 if ($Version -eq $protectedHistoricalVersion) {
-    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.25."
+    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.26."
 }
 if ($Version -ne $requiredVersion) {
-    throw "Refusing to build release version $Version. Expected exactly 3.2.25."
+    throw "Refusing to build release version $Version. Expected exactly 3.2.26."
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -73,6 +73,8 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_24_release.py",
     "scripts\verify_v3_2_25_release.py",
     "scripts\test_verify_v3_2_25_release.py",
+    "scripts\verify_v3_2_26_release.py",
+    "scripts\test_verify_v3_2_26_release.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
     "scripts\oss_local_export.py",
@@ -169,7 +171,8 @@ $releaseInputs = @(
     "ops\releases\V3.2.22.md",
     "ops\releases\V3.2.23.md",
     "ops\releases\V3.2.24.md",
-    "ops\releases\V3.2.25.md"
+    "ops\releases\V3.2.25.md",
+    "ops\releases\V3.2.26.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -182,8 +185,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
 }
 $sourceBranch = (& git branch --show-current).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.25") {
-    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.25."
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.26") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.26."
 }
 $worktreeChanges = @(
     git status --porcelain --untracked-files=all |
@@ -265,7 +268,7 @@ if ($performanceReportPath) {
     }
 }
 
-Write-Host "Running V3.2.25 focused release gates..."
+Write-Host "Running V3.2.26 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -273,23 +276,23 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_25_release.py"
+    "scripts\verify_v3_2_26_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
-    if ($releaseVerifier -eq "scripts\verify_v3_2_25_release.py") {
+    if ($releaseVerifier -eq "scripts\verify_v3_2_26_release.py") {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier) --phase source
     } else {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.25 release gate failed: $releaseVerifier"
+        throw "V3.2.26 release gate failed: $releaseVerifier"
     }
 }
 
-Write-Host "Running V3.2.25 contract tests..."
-& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_25_release.py -q
+Write-Host "Running V3.2.26 contract tests..."
+& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_26_release.py -q
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.2.25 contract tests failed."
+    throw "V3.2.26 contract tests failed."
 }
 
 & .\.venv\Scripts\python.exe -m pytest .\v2-api\tests\test_collector_transfer_scale.py -q
@@ -478,6 +481,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_24_release.py" "scripts\verify_v3_2_24_rel
 Copy-ReleaseItem "scripts\test_verify_v3_2_24_release.py" "scripts\test_verify_v3_2_24_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_25_release.py" "scripts\verify_v3_2_25_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_25_release.py" "scripts\test_verify_v3_2_25_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_26_release.py" "scripts\verify_v3_2_26_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_26_release.py" "scripts\test_verify_v3_2_26_release.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"
@@ -487,9 +492,6 @@ Copy-ReleaseItem "v2-web\src\components\InstallerKpiDialog.vue" "v2-web\src\comp
 Copy-ReleaseItem "v2-web\src\utils\installerKpi.ts" "v2-web\src\utils\installerKpi.ts"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
 Copy-ReleaseItem "scripts\cleanup_old_releases.sh" "scripts\cleanup_old_releases.sh"
-Copy-ReleaseItem "scripts\run_photo_barcode_maintenance.sh" "scripts\run_photo_barcode_maintenance.sh"
-Copy-ReleaseItem "scripts\run_photo_barcode_maintenance_slice.sh" "scripts\run_photo_barcode_maintenance_slice.sh"
-Copy-ReleaseItem "scripts\run_photo_barcode_not_matched_rescan.sh" "scripts\run_photo_barcode_not_matched_rescan.sh"
 Copy-ReleaseItem "scripts\production_health_check.py" "scripts\production_health_check.py"
 
 Copy-ReleaseItem "v2-api\app" "v2-api\app"
@@ -626,6 +628,18 @@ function Remove-ForbiddenReleaseItems {
 
 Remove-ForbiddenReleaseItems
 
+$retiredBackgroundBarcodeReleasePaths = @(
+    "infra\module-manager-v2-photo-barcode-maintenance.service",
+    "infra\module-manager-v2-photo-barcode-maintenance-enqueue.service",
+    "infra\module-manager-v2-photo-barcode-maintenance.timer"
+)
+foreach ($relativePath in $retiredBackgroundBarcodeReleasePaths) {
+    $retiredPath = Join-Path $staging $relativePath
+    if (Test-Path -LiteralPath $retiredPath -PathType Leaf) {
+        Remove-Item -Force -LiteralPath $retiredPath
+    }
+}
+
 $stagedStaticDir = Join-Path $staging "v2-api\app\static"
 if (Test-Path $stagedStaticDir) {
     Get-ChildItem -LiteralPath $stagedStaticDir -File -Filter "*.html" -Force |
@@ -714,10 +728,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "Release package verification failed."
 }
 
-& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_25_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
+& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_26_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
 if ($LASTEXITCODE -ne 0) {
     Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
-    throw "V3.2.25 source-bound package verification failed."
+    throw "V3.2.26 source-bound package verification failed."
 }
 
 Write-Host ""

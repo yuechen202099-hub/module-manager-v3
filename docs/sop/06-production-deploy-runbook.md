@@ -49,6 +49,157 @@ APP=/opt/module-manager-v2
 VERSION=<version>
 STAMP=$(date +%Y%m%d_%H%M%S)
 REL=$APP/releases/v$VERSION-$STAMP
+RETIRED_UNITS=(
+  module-manager-v2-photo-barcode-maintenance.service
+  module-manager-v2-photo-barcode-maintenance-enqueue.service
+  module-manager-v2-photo-barcode-maintenance.timer
+)
+
+validate_release_directory() {
+  local target=$1
+  if [ -z "$target" ] || [ ! -d "$target" ]; then
+    echo "Release target is missing or is not a directory: $target" >&2
+    return 1
+  fi
+  case "$target" in
+    "$APP"/releases/v*) ;;
+    *)
+      echo "Release target is outside $APP/releases: $target" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -f "$target/RELEASE_MANIFEST.md" ]; then
+    echo "Release target has no RELEASE_MANIFEST.md: $target" >&2
+    return 1
+  fi
+}
+
+if [ -L "$APP/current" ]; then
+  :
+else
+  echo "$APP/current must be an existing symlink before deployment" >&2
+  exit 1
+fi
+if ! PREVIOUS=$(readlink -f -- "$APP/current"); then
+  echo "Unable to resolve the current release symlink" >&2
+  exit 1
+fi
+validate_release_directory "$PREVIOUS"
+PREVIOUS_NAME=$(basename "$PREVIOUS")
+if [[ "$PREVIOUS_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
+  PREVIOUS_VERSION=${BASH_REMATCH[1]}
+else
+  echo "Unable to derive the previous semantic version from: $PREVIOUS" >&2
+  exit 1
+fi
+
+assert_retired_unit() {
+  local unit=$1
+  local load_state
+  local active_state
+  local unit_file_state
+  if ! LOAD_STATE=$(systemctl show "$unit" --property=LoadState --value); then
+    echo "Unable to query retired unit load state: $unit" >&2
+    return 1
+  fi
+  load_state=$LOAD_STATE
+  if [ "$load_state" = "not-found" ]; then
+    return 0
+  fi
+  if ! ACTIVE_STATE=$(systemctl show "$unit" --property=ActiveState --value); then
+    echo "Unable to query retired unit active state: $unit" >&2
+    return 1
+  fi
+  active_state=$ACTIVE_STATE
+  case "$active_state" in
+    inactive|failed) ;;
+    *)
+      echo "Retired background barcode unit is not inactive: $unit ($active_state)" >&2
+      return 1
+      ;;
+  esac
+  if ! UNIT_FILE_STATE=$(systemctl show "$unit" --property=UnitFileState --value); then
+    echo "Unable to query retired unit file state: $unit" >&2
+    return 1
+  fi
+  unit_file_state=$UNIT_FILE_STATE
+  case "$unit_file_state" in
+    disabled|static|indirect|masked) ;;
+    *)
+      echo "Retired background barcode unit is not disabled: $unit ($unit_file_state)" >&2
+      return 1
+      ;;
+  esac
+}
+
+retire_unit() {
+  local unit=$1
+  local load_state
+  if ! LOAD_STATE=$(systemctl show "$unit" --property=LoadState --value); then
+    echo "Unable to query retired unit before disabling it: $unit" >&2
+    return 1
+  fi
+  load_state=$LOAD_STATE
+  if [ "$load_state" != "not-found" ]; then
+    systemctl disable --now "$unit"
+  fi
+  assert_retired_unit "$unit"
+}
+
+wait_for_uvicorn() {
+  "$APP/venv/bin/python" - <<'PY'
+import socket
+import time
+
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", 8000), timeout=1):
+            raise SystemExit(0)
+    except OSError:
+        time.sleep(1)
+raise SystemExit("Uvicorn did not listen on 127.0.0.1:8000 within 60 seconds")
+PY
+}
+
+rollback_cutover() {
+  local original_code=$?
+  local restored
+  trap - ERR
+  set +e
+  ROLLBACK_FAILED=0
+  if [ "${CUTOVER_PENDING:-0}" -ne 1 ]; then
+    ROLLBACK_FAILED=1
+  elif ! validate_release_directory "$PREVIOUS"; then
+    ROLLBACK_FAILED=1
+  elif ! ln -sfn "$PREVIOUS" "$APP/current"; then
+    ROLLBACK_FAILED=1
+  elif ! RESTORED=$(readlink -f -- "$APP/current"); then
+    ROLLBACK_FAILED=1
+  else
+    restored=$RESTORED
+    if [ "$restored" != "$PREVIOUS" ]; then
+      ROLLBACK_FAILED=1
+    elif ! systemctl daemon-reload; then
+      ROLLBACK_FAILED=1
+    elif ! systemctl restart module-manager-v2.service; then
+      ROLLBACK_FAILED=1
+    elif ! wait_for_uvicorn; then
+      ROLLBACK_FAILED=1
+    elif ! "$APP/venv/bin/python" "$APP/current/scripts/production_health_check.py" \
+      --base-url http://127.0.0.1 \
+      --expected-version "$PREVIOUS_VERSION" \
+      --env "$APP/.env"; then
+      ROLLBACK_FAILED=1
+    fi
+  fi
+  if [ "$ROLLBACK_FAILED" -ne 0 ]; then
+    echo "Automatic rollback failed; current release state requires manual recovery." >&2
+    exit 70
+  fi
+  exit "$original_code"
+}
+
 if ! id -u modulemgr >/dev/null 2>&1; then
   useradd --system --home-dir "$APP" --no-create-home --shell /usr/sbin/nologin modulemgr
 fi
@@ -85,10 +236,23 @@ if find "$APP/venv" \( -type f -o -type d \) -perm -g+w -print -quit | grep -q .
 fi
 runuser -u modulemgr -- "$APP/venv/bin/python" -c "from PIL import Image"
 
-# Keep background maintenance stopped until the new API and schema pass health checks.
-systemctl stop module-manager-v2-photo-barcode-maintenance.service 2>/dev/null || true
-systemctl stop module-manager-v2-photo-barcode-maintenance.timer 2>/dev/null || true
-systemctl stop module-manager-v2-photo-barcode-maintenance-enqueue.service 2>/dev/null || true
+# V3.2.26 permanently retires background barcode recognition. Disable old
+# services before cutover and remove their unit files so a later daemon reload
+# cannot bring them back.
+for UNIT in "${RETIRED_UNITS[@]}"; do
+  retire_unit "$UNIT"
+done
+for UNIT in "${RETIRED_UNITS[@]}"; do
+  assert_retired_unit "$UNIT"
+done
+rm -f \
+  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.service \
+  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance-enqueue.service \
+  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.timer
+systemctl daemon-reload
+for UNIT in "${RETIRED_UNITS[@]}"; do
+  assert_retired_unit "$UNIT"
+done
 
 # The current candidate requires the complete 20260721_0005 -> 20260824_0016 upgrade chain.
 set -a
@@ -98,27 +262,28 @@ cd "$REL/v2-api"
 $APP/venv/bin/python -m alembic upgrade head
 $APP/venv/bin/python -m alembic current | grep -q "20260824_0016"
 
-install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.service" \
-  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.service
-install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance-enqueue.service" \
-  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance-enqueue.service
-install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.timer" \
-  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.timer
 install -m 0644 "$REL/infra/module-manager-v2.service" \
   /etc/systemd/system/module-manager-v2.service
 
+CUTOVER_PENDING=1
+trap rollback_cutover ERR
 ln -sfn "$REL" "$APP/current"
 systemctl daemon-reload
 systemctl enable module-manager-v2.service
-systemctl enable module-manager-v2-photo-barcode-maintenance.service
-systemctl enable module-manager-v2-photo-barcode-maintenance.timer
 systemctl restart module-manager-v2.service
 systemctl is-active module-manager-v2.service
 systemctl is-active nginx
 systemctl show module-manager-v2.service -p User -p Group -p WorkingDirectory -p ExecStart
+wait_for_uvicorn
+"$APP/venv/bin/python" "$APP/current/scripts/production_health_check.py" \
+  --base-url http://127.0.0.1 \
+  --expected-version "$VERSION" \
+  --env "$APP/.env"
+CUTOVER_PENDING=0
+trap - ERR
 ```
 
-The `0006` through `0016` migrations are forward-only in this release. A code rollback must keep the database at `20260824_0016`; do not run `alembic downgrade` in production. The API, worker, and enqueue service must all report `modulemgr` as their configured user before the worker is resumed.
+The `0006` through `0016` migrations are forward-only in this release. A code rollback must keep the database at `20260824_0016`; do not run `alembic downgrade` in production. The API service must report `modulemgr` as its configured user.
 
 ## Post-Deploy Health Check
 
@@ -134,24 +299,15 @@ APP=/opt/module-manager-v2
 SECURITY_ENV_PATH="$APP/.env" "$APP/venv/bin/python" "$APP/current/scripts/audit_production_security.py"
 ```
 
-Only after the main service, pages, and security audit pass, resume and start the low-load serial worker and the midnight enqueue timer:
+Confirm again that all retired background barcode services remain disabled and inactive:
 
 ```bash
-APP=/opt/module-manager-v2
-cd "$APP/current/v2-api"
-"$APP/venv/bin/python" - <<'PY'
-from app.services.barcode_maintenance_worker import set_maintenance_paused
-
-print(set_maintenance_paused(False, "production-deploy"))
-PY
-systemctl start module-manager-v2-photo-barcode-maintenance.service
-systemctl start module-manager-v2-photo-barcode-maintenance.timer
-systemctl is-active module-manager-v2-photo-barcode-maintenance.service
-systemctl is-active module-manager-v2-photo-barcode-maintenance.timer
-systemctl status module-manager-v2-photo-barcode-maintenance-enqueue.service --no-pager || true
+for UNIT in "${RETIRED_UNITS[@]}"; do
+  assert_retired_unit "$UNIT"
+done
 ```
 
-The worker must remain one process, use batches of at most 20 groups, process serially, and pause 5 seconds after every full batch.
+This retirement does not remove construction live scanning, collector-inventory scanning, review-region scanning, or historical recognition results.
 
 `PHOTO_PROXY_ALLOWED_HOSTS` must list the real external photo source domains. If it is empty, the production image proxy will reject external photo fallback requests under the explicit allowlist policy.
 
