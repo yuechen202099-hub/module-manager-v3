@@ -62,3 +62,17 @@ def test_export_job_and_lease_keep_manifest_and_global_scope() -> None:
     lease = MaterialExportLease.__table__
     assert lease.c.scope.primary_key is True
     assert str(lease.c.scope.server_default.arg) == "'global-download'"
+
+
+def test_material_export_model_ddl_remains_compatible_with_sqlite_test_databases() -> None:
+    json_columns = (
+        MaterialExportJob.__table__.c.stats,
+        MaterialExportJob.__table__.c.diagnostics,
+        MaterialExportTerminal.__table__.c.manifest_json,
+        MaterialExportTerminal.__table__.c.diagnostics,
+    )
+    assert all(
+        column.server_default is None
+        or "::jsonb" not in str(column.server_default.arg)
+        for column in json_columns
+    )

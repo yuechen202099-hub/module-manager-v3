@@ -1052,10 +1052,10 @@ class MaterialExportJob(Base, TimestampMixin):
     )
     created_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
     stats: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+        JSONB, nullable=False, default=dict
     )
     diagnostics: Mapped[list[Any]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+        JSONB, nullable=False, default=list
     )
 
 
@@ -1113,10 +1113,10 @@ class MaterialExportTerminal(Base, TimestampMixin):
     )
     source_revision: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+        JSONB, nullable=False, default=dict
     )
     diagnostics: Mapped[list[Any]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+        JSONB, nullable=False, default=list
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
