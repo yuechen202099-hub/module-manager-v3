@@ -64,6 +64,15 @@ class Settings(BaseSettings):
         default="image/resize,m_lfit,w_1280,h_1280/quality,q_85",
         alias="OSS_PREVIEW_PROCESS",
     )
+    material_export_bytes_per_second: int = Field(
+        default=250_000, alias="MATERIAL_EXPORT_BYTES_PER_SECOND"
+    )
+    material_export_chunk_bytes: int = Field(
+        default=65_536, alias="MATERIAL_EXPORT_CHUNK_BYTES"
+    )
+    material_export_lease_seconds: int = Field(
+        default=90, alias="MATERIAL_EXPORT_LEASE_SECONDS"
+    )
     delivery_cache_path: str = Field(default="", alias="DELIVERY_CACHE_PATH")
     storage_cleanup_queue_path: str = Field(default="", alias="STORAGE_CLEANUP_QUEUE_PATH")
     project_board_summary_cache_enabled: bool = Field(default=True, alias="PROJECT_BOARD_SUMMARY_CACHE_ENABLED")

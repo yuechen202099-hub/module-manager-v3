@@ -298,7 +298,9 @@ def oss_public_endpoint() -> str:
     return normalize_oss_endpoint(settings.oss_endpoint)
 
 
-def oss_server_endpoint() -> str:
+def oss_server_endpoint(*, require_internal: bool = False) -> str:
+    if require_internal:
+        return normalize_oss_endpoint(settings.oss_internal_endpoint)
     return normalize_oss_endpoint(settings.oss_internal_endpoint or settings.oss_endpoint)
 
 
