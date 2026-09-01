@@ -1756,6 +1756,69 @@ class PostgresMaterialExportService:
         self.session.flush()
         return row
 
+    def authorize_stream(
+        self, *, job_id: str, file_id: str, lease_token: str
+    ):
+        from app.services.material_export_stream import MaterialExportFileSnapshot
+
+        token = normalize_identifier(lease_token)
+        now = datetime.now(UTC)
+        lease = self.session.scalar(
+            select(MaterialExportLease).where(
+                MaterialExportLease.scope == "global-download",
+                MaterialExportLease.job_id == UUID(job_id),
+            )
+        )
+        if lease is None or lease.owner_token != token or lease.expires_at <= now:
+            raise MaterialExportLeaseMismatch("下载租约已失效，请重新继续")
+        row = self.session.scalar(
+            select(MaterialExportFile).where(
+                MaterialExportFile.id == UUID(file_id),
+                MaterialExportFile.job_id == UUID(job_id),
+                MaterialExportFile.team_id == self.team_id,
+            )
+        )
+        if row is None or row.source_kind == "client_workbook":
+            raise ValueError("导出文件不存在")
+        return MaterialExportFileSnapshot.from_row(row)
+
+    def record_stream_event(
+        self, *, file_id: str, outcome: str, byte_size: int
+    ) -> None:
+        if outcome not in {"finished", "aborted"}:
+            raise ValueError("下载流结果无效")
+        row = self.session.scalar(
+            select(MaterialExportFile)
+            .where(
+                MaterialExportFile.id == UUID(file_id),
+                MaterialExportFile.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            return
+        if outcome == "finished":
+            if row.status != "completed":
+                row.status = "pending"
+                row.error_message = None
+        else:
+            row.status = "failed"
+            row.retry_count += 1
+            row.error_message = f"浏览器中断，已传输 {max(0, int(byte_size))} 字节"
+        self.session.add(
+            AuditLog(
+                team_id=self.team_id,
+                actor_id=self.actor_id,
+                actor_username=self.actor,
+                project_id=row.project_id,
+                action=f"material_export.stream_{outcome}",
+                entity_type="material_export_file",
+                entity_id=row.id,
+                payload={"byte_size": max(0, int(byte_size))},
+            )
+        )
+        self.session.flush()
+
     def mark_terminal_completed(self, *, job_id: str, terminal_id: str) -> None:
         terminal = self.session.scalar(
             select(MaterialExportTerminal)

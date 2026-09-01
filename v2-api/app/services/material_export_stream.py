@@ -28,6 +28,8 @@ class MaterialExportFileSnapshot:
 
     @classmethod
     def from_row(cls, row: object) -> "MaterialExportFileSnapshot":
+        if isinstance(row, cls):
+            return row
         storage_key = str(getattr(row, "storage_key", "") or "").strip()
         sha256 = str(getattr(row, "sha256", "") or "").strip().lower()
         byte_size = getattr(row, "byte_size", None)
