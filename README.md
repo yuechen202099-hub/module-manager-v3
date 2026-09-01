@@ -73,7 +73,7 @@ Required production references:
 Verify SOP references after changing release process files:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.26 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.27 --phase source
 ```
 
 ## Vue Migration Gate
@@ -134,7 +134,7 @@ It blocks default secrets, demo auth, weak admin credentials, and incomplete dep
 Build a clean production server release package:
 
 ```powershell
-.\scripts\build-client-release.ps1 -Version 3.2.26
+.\scripts\build-client-release.ps1 -Version 3.2.27
 ```
 
 The release package is created under `build/server-release/` and includes `RELEASE_MANIFEST.md` with version, generated time, included files, excluded local artifacts, verification commands, and production notes. Historical client-demo package instructions are not part of the production workflow; production deployment uses only the server-release package.

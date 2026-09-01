@@ -2,9 +2,9 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.26.zip`
-- Name: `module-manager-v2-server-3.2.26.zip`
-- Version: 3.2.26
+- Package: `build/server-release/module-manager-v2-server-3.2.27.zip`
+- Name: `module-manager-v2-server-3.2.27.zip`
+- Version: 3.2.27
 - Generated at: pending
 - Size: pending
 - SHA256: pending
@@ -17,10 +17,11 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.25 records, V3.2.9 Quagga-first scanner regressions, V3.2.13 classification-independent rephoto gates, V3.2.14 archive/manual-demand/source-photo gates, V3.2.15 exception-count/deferred-image gates, V3.2.16 reviewer-claim removal gates, V3.2.17 anomaly-confirmation/meter-module-export gates, V3.2.18 approved-exception closure gates, V3.2.19 terminal meter-number deduplication gates, V3.2.20 effective collector/module display gates, V3.2.21 audited bulk anomaly approval gates, V3.2.22 complete meter-module candidate export gates, V3.2.23 data-center save/photo workflow gates, V3.2.24 effective identity synchronization gates, V3.2.25 retired collector-photo-only exception gates, and V3.2.26 collector-missing exception normalization plus background barcode-maintenance retirement gates
+- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.26 records, and the active V3.2.27 task-dispatch terminal material export contract
 - Nginx retirement patcher, server migration and manifest signer, Windows-local downloader, verifier tests, operator SOP, and release record
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
-- V3.2.26 excludes retired barcode-maintenance systemd units and background runner scripts while retaining manual scan APIs and historical recognition data
+- V3.2.27 preserves V3.2.26 background barcode retirement and adds no export worker, ZIP builder, or server-side export cache
+- V3.2.27 includes Alembic revision `20260901_0017` for durable export reservations, files, settings, and the global download lease
 - Requirements and Dockerfile
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
 - Local static review images and the demo data seed script for pre-production smoke checks
@@ -52,13 +53,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.26 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.27 --phase source
 
 ## Verified Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- Historical release contracts plus the active V3.2.26 collector-missing exception normalization, background barcode-maintenance retirement, package, and lifecycle contracts must pass
+- Historical release contracts plus the active V3.2.27 material-export, migration, package, and lifecycle contracts must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default

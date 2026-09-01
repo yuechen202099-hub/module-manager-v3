@@ -5,12 +5,12 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.2.26`
-- 当前生产应用基线：`V3.2.25`
-- 当前发布候选版本：`V3.2.26`
-- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.25-20260831T224124Z`
-- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.24-20260831T133027Z`
-- 当前生产提交：`ddfd09301612c5c278a1b7652a9be483f729d0cf`
+- 生产维护分支：`production/V3/3.2.27`
+- 当前生产应用基线：`V3.2.26`
+- 当前发布候选版本：`V3.2.27`
+- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.26-20260901T012936Z`
+- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.25-20260831T224124Z`
+- 当前生产提交：`8cc7d2d8c0b0c5fb378e92ee8bc67b43fba0e0cb`
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.2.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\v3.2.21-bulk-anomaly-approval`
 - worktree 目录名是创建时用途标识，不代表当前线上版本；以本节的分支、候选版本和生产 release 为准。
@@ -74,7 +74,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.26 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.27 --phase source
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
 ```
