@@ -252,6 +252,11 @@ def _has_construction_evidence(evidence: ReviewMeterEvidence) -> bool:
     return bool(evidence.active_photos or evidence.persisted_photo_count > 0)
 
 
+def is_constructed_evidence(evidence: ReviewMeterEvidence) -> bool:
+    """Expose the review projection's construction rule for other domains."""
+    return _has_construction_evidence(evidence)
+
+
 def _meter_evidence_key(evidence: ReviewMeterEvidence) -> tuple[str, str]:
     meter_no = normalize_identifier(evidence.meter_no)
     if meter_no:

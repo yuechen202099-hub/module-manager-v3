@@ -10,6 +10,7 @@ from app.domain.terminal_review import (
     ReviewPhotoEvidence,
     TerminalReviewProjection,
     derive_terminal_workflow_state,
+    is_constructed_evidence,
     project_terminal_review,
 )
 
@@ -19,6 +20,16 @@ def photo(photo_id: str, category: str, sha_byte: str) -> ReviewPhotoEvidence:
         id=photo_id,
         category=category,
         sha256=sha_byte * 64,
+    )
+
+
+def test_public_constructed_evidence_uses_existing_projection_rule() -> None:
+    assert is_constructed_evidence(review_meter("constructed")) is True
+    assert (
+        is_constructed_evidence(
+            review_meter("unconstructed", persisted_photo_count=0, active_photos=())
+        )
+        is False
     )
 
 
