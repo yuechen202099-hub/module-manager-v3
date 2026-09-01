@@ -978,3 +978,322 @@ class CollectorWorkbenchItem(Base, TimestampMixin):
     completed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     completed_by_username: Mapped[str | None] = mapped_column(String(64))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TerminalExportSetting(Base, TimestampMixin):
+    __tablename__ = "terminal_export_settings"
+    __table_args__ = (
+        UniqueConstraint(
+            "team_id",
+            "project_id",
+            "task_id",
+            name="uq_terminal_export_settings_team_project_task",
+        ),
+        CheckConstraint(
+            "requested_collector_count >= 0",
+            name="ck_terminal_export_settings_requested_count",
+        ),
+        Index(
+            "ix_terminal_export_settings_project_terminal",
+            "team_id",
+            "project_id",
+            "terminal_code",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    requested_collector_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_by_username: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", server_default=text("''")
+    )
+
+
+class MaterialExportJob(Base, TimestampMixin):
+    __tablename__ = "material_export_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('prechecking', 'ready', 'reserved', 'downloading', 'paused', "
+            "'needs_recheck', 'failed', 'completed', 'cancelled')",
+            name="ck_material_export_jobs_status",
+        ),
+        Index("ix_material_export_jobs_project_created", "team_id", "project_id", "created_at"),
+        Index("ix_material_export_jobs_status", "status", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="reserved", server_default=text("'reserved'")
+    )
+    preflight_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    stats: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    diagnostics: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+
+class MaterialExportTerminal(Base, TimestampMixin):
+    __tablename__ = "material_export_terminals"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id", "task_id", name="uq_material_export_terminals_job_task"
+        ),
+        CheckConstraint(
+            "status IN ('not_prechecked', 'blocked', 'ready', 'reserved', 'downloading', "
+            "'paused', 'needs_recheck', 'failed', 'completed', 'cancelled_released')",
+            name="ck_material_export_terminals_status",
+        ),
+        CheckConstraint(
+            "requested_collector_count >= 0 AND source_collector_count >= 0 "
+            "AND final_collector_count >= source_collector_count "
+            "AND final_collector_count >= requested_collector_count",
+            name="ck_material_export_terminals_counts",
+        ),
+        Index(
+            "ix_material_export_terminals_project_task",
+            "team_id",
+            "project_id",
+            "task_id",
+        ),
+        Index("ix_material_export_terminals_job_status", "job_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("material_export_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False
+    )
+    terminal_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_prechecked", server_default=text("'not_prechecked'")
+    )
+    requested_collector_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    source_collector_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    final_collector_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    source_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    diagnostics: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaterialExportCollectorAllocation(Base, TimestampMixin):
+    __tablename__ = "material_export_collector_allocations"
+    __table_args__ = (
+        CheckConstraint(
+            "allocation_mode IN ('same_number', 'random_pool', 'extra_pool')",
+            name="ck_material_export_allocations_mode",
+        ),
+        CheckConstraint(
+            "photo_source_kind IN ('inventory_same', 'terminal_group', 'pool', 'none')",
+            name="ck_material_export_allocations_photo_source",
+        ),
+        CheckConstraint(
+            "status IN ('reserved', 'used', 'released')",
+            name="ck_material_export_allocations_status",
+        ),
+        Index(
+            "ix_material_export_allocations_project_status",
+            "team_id",
+            "project_id",
+            "status",
+        ),
+        Index(
+            "uq_material_export_allocations_active_requirement",
+            "terminal_export_id",
+            "requirement_key",
+            unique=True,
+            postgresql_where=text("status IN ('reserved', 'used')"),
+            sqlite_where=text("status IN ('reserved', 'used')"),
+        ),
+        Index(
+            "uq_material_export_allocations_active_physical",
+            "physical_collector_id",
+            unique=True,
+            postgresql_where=text("status IN ('reserved', 'used')"),
+            sqlite_where=text("status IN ('reserved', 'used')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("material_export_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_export_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("material_export_terminals.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    requirement_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_collector_no: Mapped[str | None] = mapped_column(String(255))
+    physical_collector_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("physical_collectors.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_assignments.id", ondelete="SET NULL")
+    )
+    collector_photo_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_photos.id", ondelete="SET NULL")
+    )
+    group_photo_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("photos.id", ondelete="SET NULL")
+    )
+    allocation_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    photo_source_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="none", server_default=text("'none'")
+    )
+    prior_pool_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="reserved", server_default=text("'reserved'")
+    )
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    released_by_username: Mapped[str | None] = mapped_column(String(64))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaterialExportFile(Base, TimestampMixin):
+    __tablename__ = "material_export_files"
+    __table_args__ = (
+        UniqueConstraint(
+            "terminal_export_id", "relative_path", name="uq_material_export_files_terminal_path"
+        ),
+        CheckConstraint(
+            "source_kind IN ('photo', 'collector_photo', 'client_workbook')",
+            name="ck_material_export_files_source_kind",
+        ),
+        CheckConstraint(
+            "(source_kind = 'photo' AND source_photo_id IS NOT NULL "
+            "AND source_collector_photo_id IS NULL) OR "
+            "(source_kind = 'collector_photo' AND source_photo_id IS NULL "
+            "AND source_collector_photo_id IS NOT NULL) OR "
+            "(source_kind = 'client_workbook' AND source_photo_id IS NULL "
+            "AND source_collector_photo_id IS NULL)",
+            name="ck_material_export_files_source_reference",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'downloading', 'completed', 'failed', 'skipped')",
+            name="ck_material_export_files_status",
+        ),
+        CheckConstraint(
+            "(byte_size IS NULL OR byte_size >= 0) AND retry_count >= 0",
+            name="ck_material_export_files_sizes",
+        ),
+        Index("ix_material_export_files_job_status", "job_id", "status"),
+        Index("ix_material_export_files_terminal_order", "terminal_export_id", "manifest_position"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("material_export_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_export_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("material_export_terminals.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_photo_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("photos.id", ondelete="RESTRICT")
+    )
+    source_collector_photo_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_photos.id", ondelete="RESTRICT")
+    )
+    storage_type: Mapped[str | None] = mapped_column(String(32))
+    storage_bucket: Mapped[str | None] = mapped_column(String(255))
+    storage_key: Mapped[str | None] = mapped_column(Text)
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    original_extension: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    byte_size: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    manifest_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaterialExportLease(Base, TimestampMixin):
+    __tablename__ = "material_export_leases"
+    __table_args__ = (
+        CheckConstraint("scope = 'global-download'", name="ck_material_export_leases_scope"),
+        Index("ix_material_export_leases_expiry", "expires_at"),
+    )
+
+    scope: Mapped[str] = mapped_column(
+        String(32), primary_key=True, server_default=text("'global-download'")
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("material_export_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_token: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    owner_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

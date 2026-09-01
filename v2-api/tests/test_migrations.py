@@ -239,3 +239,43 @@ def test_project_collector_inventory_migration_rejects_downgrade_before_ddl() ->
 
     with pytest.raises(RuntimeError, match="forward-only"):
         migration.downgrade()
+
+
+def test_material_export_migration_is_forward_only_and_chained() -> None:
+    migration = load_migration_module("0017_material_exports.py")
+    upgrade = render_postgresql_ddl("upgrade", "0017_material_exports.py")
+
+    assert migration.revision == "20260901_0017"
+    assert migration.down_revision == "20260824_0016"
+    for table in (
+        "terminal_export_settings",
+        "material_export_jobs",
+        "material_export_terminals",
+        "material_export_collector_allocations",
+        "material_export_files",
+        "material_export_leases",
+    ):
+        assert f"CREATE TABLE {table}" in upgrade
+    assert "uq_material_export_allocations_active_requirement" in upgrade
+    assert "uq_material_export_allocations_active_physical" in upgrade
+    assert "WHERE status IN ('reserved', 'used')" in upgrade
+    for forbidden in (
+        "UPDATE material_groups",
+        "DELETE FROM material_groups",
+        "UPDATE photos",
+        "DELETE FROM photos",
+        "UPDATE physical_collectors",
+        "DELETE FROM physical_collectors",
+    ):
+        assert forbidden not in upgrade.upper()
+
+
+def test_material_export_migration_rejects_downgrade_before_ddl() -> None:
+    class DdlMustNotRun:
+        def __getattr__(self, name: str):
+            pytest.fail(f"downgrade attempted destructive DDL through op.{name}")
+
+    migration = load_migration_module("0017_material_exports.py")
+    migration.op = DdlMustNotRun()
+    with pytest.raises(RuntimeError, match="material export persistence is forward-only"):
+        migration.downgrade()
