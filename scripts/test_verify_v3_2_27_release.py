@@ -53,3 +53,16 @@ def test_release_sop_dispatches_v3227_to_its_versioned_verifier() -> None:
 
     assert "ops/releases/V3.2.27.md" in sop.RELEASE_INPUTS
     sop.verify_current_release_phase("source", "V3.2.27")
+
+
+def test_retired_export_gate_matches_identifiers_without_rejecting_material_export_names() -> None:
+    gate = load_script(
+        ROOT / "scripts" / "verify_v3_2_0_export_center_ui.py",
+        "verify_retired_export_identifiers_v3227",
+    )
+
+    assert gate.contains_forbidden_marker("export type ExportJob = { id: string }", "ExportJob")
+    assert gate.contains_forbidden_marker("void createExportJob(payload)", "createExportJob")
+    assert not gate.contains_forbidden_marker("export type MaterialExportJob = { id: string }", "ExportJob")
+    assert not gate.contains_forbidden_marker("void createMaterialExportJob(payload)", "createExportJob")
+    assert gate.contains_forbidden_marker("client.get('/exports')", "/exports")

@@ -78,6 +78,7 @@ GENERATED_TEXT_SUFFIXES = {".css", ".html", ".js", ".json", ".map", ".txt"}
 RETIRED_EXPORT_ROUTE_RE = re.compile(
     r"\b(?:path|redirect)\b\s*:\s*(['\"`])/?exports(?:[/?#][^'\"`]*)?\1"
 )
+IDENTIFIER_MARKER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
 def read(relative_path: str) -> str:
@@ -87,6 +88,13 @@ def read(relative_path: str) -> str:
 def ensure(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def contains_forbidden_marker(source: str, marker: str) -> bool:
+    if IDENTIFIER_MARKER_RE.fullmatch(marker):
+        boundary = rf"(?<![A-Za-z0-9_$]){re.escape(marker)}(?![A-Za-z0-9_$])"
+        return re.search(boundary, source) is not None
+    return marker in source
 
 
 def source_files() -> list[Path]:
@@ -253,8 +261,11 @@ def main() -> None:
     generated_source = combined_text(generated, GENERATED_TEXT_SUFFIXES)
     generated_names = "\n".join(path.relative_to(GENERATED_VUE_ROOT).as_posix() for path in generated)
     for marker in sorted(FORBIDDEN_MARKERS, key=len, reverse=True):
-        ensure(marker not in source, f"retired frontend marker remains: {marker}")
-        ensure(marker not in generated_source, f"retired generated Vue marker remains: {marker}")
+        ensure(not contains_forbidden_marker(source, marker), f"retired frontend marker remains: {marker}")
+        ensure(
+            not contains_forbidden_marker(generated_source, marker),
+            f"retired generated Vue marker remains: {marker}",
+        )
     for marker in GENERATED_NAME_MARKERS:
         ensure(marker not in generated_names, f"retired generated Vue asset remains: {marker}")
 
