@@ -16,6 +16,7 @@ from app.services.material_export import (
     MaterialExportProjectMismatch,
     ProjectExportEvidence,
     build_preflight,
+    external_material_export_task_id,
 )
 
 
@@ -171,3 +172,13 @@ def test_resumable_export_errors_have_stable_contract_codes() -> None:
     assert MaterialExportBusy.code == "export_busy"
     assert MaterialExportLeaseMismatch.code == "lease_mismatch"
     assert MaterialExportFileMismatch.code == "file_mismatch"
+
+
+def test_terminal_summary_uses_the_task_id_exposed_by_task_dispatch() -> None:
+    task_id = uuid4()
+    assert external_material_export_task_id(
+        SimpleNamespace(id=task_id, legacy_id=350000444549)
+    ) == "350000444549"
+    assert external_material_export_task_id(
+        SimpleNamespace(id=task_id, legacy_id=None)
+    ) == str(task_id)

@@ -203,6 +203,12 @@ def _setting_count(setting: object | None) -> int:
     return max(0, int(getattr(setting, "requested_collector_count", 0) or 0))
 
 
+def external_material_export_task_id(task: Task) -> str:
+    """Return the identifier exposed by task dispatch to the browser."""
+    legacy_id = getattr(task, "legacy_id", None)
+    return str(legacy_id if legacy_id is not None else task.id)
+
+
 _CONTENT_TYPE_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -795,6 +801,7 @@ class PostgresMaterialExportService:
         results: list[TerminalMaterialExportSummary] = []
         for task in tasks:
             task_id = str(task.id)
+            external_task_id = external_material_export_task_id(task)
             meters = tuple(
                 item
                 for item in evidence_by_project[task.project_id].meters
@@ -828,7 +835,7 @@ class PostgresMaterialExportService:
             )
             results.append(
                 TerminalMaterialExportSummary(
-                    task_id=task_id,
+                    task_id=external_task_id,
                     project_id=str(task.project_id),
                     terminal_code=normalize_identifier(task.terminal),
                     requested_collector_count=_setting_count(settings.get(task_id)),
