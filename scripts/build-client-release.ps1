@@ -75,6 +75,9 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_25_release.py",
     "scripts\verify_v3_2_26_release.py",
     "scripts\test_verify_v3_2_26_release.py",
+    "scripts\verify_v3_2_27_release.py",
+    "scripts\test_verify_v3_2_27_release.py",
+    "scripts\verify_material_export_gate.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
     "scripts\oss_local_export.py",
@@ -485,6 +488,9 @@ Copy-ReleaseItem "scripts\verify_v3_2_25_release.py" "scripts\verify_v3_2_25_rel
 Copy-ReleaseItem "scripts\test_verify_v3_2_25_release.py" "scripts\test_verify_v3_2_25_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_26_release.py" "scripts\verify_v3_2_26_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_26_release.py" "scripts\test_verify_v3_2_26_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_27_release.py" "scripts\verify_v3_2_27_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_27_release.py" "scripts\test_verify_v3_2_27_release.py"
+Copy-ReleaseItem "scripts\verify_material_export_gate.py" "scripts\verify_material_export_gate.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"
