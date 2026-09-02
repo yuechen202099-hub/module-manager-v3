@@ -370,13 +370,21 @@ function Copy-ReleaseItem {
     if ($Source -eq "v2-api\app") {
         $appSource = Join-Path $root $Source
         $runtimeUploads = Join-Path $appSource "static\uploads"
-        & robocopy $appSource $target /E /XD $runtimeUploads /NFL /NDL /NJH /NJS /NP
+        & robocopy $appSource $target /E /XD $runtimeUploads "__pycache__" ".pytest_cache" /XF "*.pyc" /NFL /NDL /NJH /NJS /NP
         if ($LASTEXITCODE -gt 7) {
             throw "Unable to copy application source while excluding runtime uploads. robocopy exit code: $LASTEXITCODE"
         }
         return
     }
-    Copy-Item -Recurse -Force -LiteralPath (Join-Path $root $Source) -Destination $target
+    $sourcePath = Join-Path $root $Source
+    if (Test-Path -LiteralPath $sourcePath -PathType Container) {
+        & robocopy $sourcePath $target /E /XD "__pycache__" ".pytest_cache" /XF "*.pyc" /NFL /NDL /NJH /NJS /NP
+        if ($LASTEXITCODE -gt 7) {
+            throw "Unable to copy release directory while excluding generated caches. robocopy exit code: $LASTEXITCODE"
+        }
+        return
+    }
+    Copy-Item -Force -LiteralPath $sourcePath -Destination $target
 }
 
 Copy-ReleaseItem "README.md" "README.md"

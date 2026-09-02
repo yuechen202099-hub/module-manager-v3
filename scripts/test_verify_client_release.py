@@ -823,6 +823,13 @@ def test_release_builder_checks_cleanliness_before_building_into_isolated_stagin
     assert "process.env.MODULE_MANAGER_VUE_OUT_DIR" in vite_config
 
 
+def test_release_builder_excludes_generated_python_caches_from_directory_copies() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    assert '/XD "__pycache__" ".pytest_cache"' in build_script
+    assert 'robocopy $sourcePath $target /E' in build_script
+
+
 def test_release_builder_guards_candidate_version_before_output_mutation() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
