@@ -1,6 +1,7 @@
 import type { App, Plugin } from 'vue'
 import { ElAlert } from 'element-plus/es/components/alert/index'
 import { ElButton } from 'element-plus/es/components/button/index'
+import { ElCheckbox } from 'element-plus/es/components/checkbox/index'
 import { ElDescriptions, ElDescriptionsItem } from 'element-plus/es/components/descriptions/index'
 import { ElDialog } from 'element-plus/es/components/dialog/index'
 import { ElDrawer } from 'element-plus/es/components/drawer/index'
@@ -27,6 +28,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 const components: Plugin[] = [
   ElAlert,
   ElButton,
+  ElCheckbox,
   ElDescriptions,
   ElDescriptionsItem,
   ElDialog,

@@ -24,6 +24,7 @@ export interface DataCenterRouteQuery {
   installer: string
   installerSource: DataCenterInstallerSource
   hasPhotos: boolean
+  onlyUnclassifiedPhotos: boolean
   dateFrom: string
   dateTo: string
   activityDateFrom: string
@@ -47,6 +48,7 @@ const DEFAULT_QUERY: DataCenterRouteQuery = {
   installer: '',
   installerSource: 'all',
   hasPhotos: false,
+  onlyUnclassifiedPhotos: false,
   dateFrom: '',
   dateTo: '',
   activityDateFrom: '',
@@ -86,6 +88,7 @@ function routeQueryToState(query: Record<string, unknown>): DataCenterRouteQuery
     installer: first(query.installer),
     installerSource: ['all', 'photo'].includes(installerSource) ? installerSource as DataCenterInstallerSource : 'all',
     hasPhotos: first(query.has_photos || query.hasPhotos) === '1',
+    onlyUnclassifiedPhotos: first(query.only_unclassified_photos || query.onlyUnclassifiedPhotos) === '1',
     dateFrom: first(query.date_from || query.dateFrom),
     dateTo: first(query.date_to || query.dateTo),
     activityDateFrom: first(query.activity_date_from || query.activityDateFrom),
@@ -124,6 +127,7 @@ function serializeQuery(state: DataCenterRouteQuery) {
     if (value !== DEFAULT_QUERY[key] && value !== '') query[serialized] = String(value)
   }
   if (state.hasPhotos) query.has_photos = '1'
+  if (state.onlyUnclassifiedPhotos) query.only_unclassified_photos = '1'
   if (state.review) query.review = '1'
   return query
 }
@@ -212,6 +216,7 @@ export function useDataCenterQuery() {
         installer: query.installer,
         installerSource: query.installerSource,
         hasPhotos: query.hasPhotos,
+        onlyUnclassifiedPhotos: query.onlyUnclassifiedPhotos,
         dateFrom: query.dateFrom,
         dateTo: query.dateTo,
         activityDateFrom: query.activityDateFrom,

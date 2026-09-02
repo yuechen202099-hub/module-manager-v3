@@ -1646,6 +1646,7 @@ export type DataCenterListQuery = {
   installer?: string
   installerSource?: DataCenterInstallerSource
   hasPhotos?: boolean
+  onlyUnclassifiedPhotos?: boolean
   dateFrom?: string
   dateTo?: string
   activityDateFrom?: string
@@ -1675,6 +1676,7 @@ export async function fetchDataCenterRows(query: DataCenterListQuery): Promise<D
     sort: query.sort || 'updated_desc',
   })
   if (query.hasPhotos) params.set('has_photos', '1')
+  if (query.onlyUnclassifiedPhotos) params.set('only_unclassified_photos', '1')
   if (query.dateFrom) params.set('date_from', query.dateFrom)
   if (query.dateTo) params.set('date_to', query.dateTo)
   if (query.activityDateFrom) params.set('activity_date_from', query.activityDateFrom)

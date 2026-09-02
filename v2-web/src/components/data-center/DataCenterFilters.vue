@@ -93,6 +93,11 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
     <el-select :model-value="props.modelValue.classificationStatus" @update:model-value="update('classificationStatus', String($event || 'all'))">
       <el-option v-for="item in classificationOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
+    <el-checkbox
+      :model-value="props.modelValue.onlyUnclassifiedPhotos"
+      label="仅看未分类照片"
+      @update:model-value="update('onlyUnclassifiedPhotos', Boolean($event))"
+    />
     <el-select :model-value="props.modelValue.exceptionStatus" @update:model-value="update('exceptionStatus', String($event || ''))">
       <el-option v-for="item in exceptionOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>

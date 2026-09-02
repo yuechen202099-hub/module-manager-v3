@@ -5210,6 +5210,10 @@ def list_data_center_rows(query) -> dict[str, Any]:
         kind, raw = candidate
         if kind == "group":
             row = data_center_service.group_row(raw)
+            row["_has_unclassified_photo"] = any(
+                str(photo.get("category") or "").strip() == "unclassified"
+                for photo in data_center_service.active_photos(raw)
+            )
             row["_terminal_status"] = terminal_statuses.get(str(row.get("terminal") or "").strip(), "incomplete")
             row["_barcode_eligible"] = data_center_service.has_current_eligible_photo_set(raw)
             row["_durable_barcode_status"] = data_center_service.durable_barcode_status_from_group(raw)

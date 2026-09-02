@@ -32,6 +32,7 @@ class DataCenterQuery(BaseModel):
     installer: str = ""
     installer_source: Literal["all", "photo"] = "all"
     has_photos: bool = False
+    only_unclassified_photos: bool = False
     date_from: date | None = None
     date_to: date | None = None
     activity_date_from: date | None = None

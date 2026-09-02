@@ -16,6 +16,7 @@ const query: DataCenterRouteQuery = {
   installer: '',
   installerSource: 'all',
   hasPhotos: false,
+  onlyUnclassifiedPhotos: false,
   dateFrom: '',
   dateTo: '',
   activityDateFrom: '',
@@ -37,6 +38,7 @@ describe('DataCenterFilters', () => {
           'el-select': { template: '<div><slot /></div>' },
           'el-option': { props: ['label'], template: '<span>{{ label }}</span>' },
           'el-date-picker': true,
+          'el-checkbox': true,
           'el-button': { template: '<button><slot /></button>' },
         },
       },
@@ -45,5 +47,23 @@ describe('DataCenterFilters', () => {
     expect(wrapper.text()).toContain('未归档')
     expect(wrapper.text()).toContain('已归档')
     expect(wrapper.text()).not.toContain('待归档')
+  })
+
+  it('offers an unclassified-photo filter switch', () => {
+    const wrapper = mount(DataCenterFilters, {
+      props: { modelValue: query },
+      global: {
+        stubs: {
+          'el-input': true,
+          'el-select': true,
+          'el-option': true,
+          'el-date-picker': true,
+          'el-checkbox': { props: ['label'], template: '<label>{{ label }}</label>' },
+          'el-button': true,
+        },
+      },
+    })
+
+    expect(wrapper.text()).toContain('仅看未分类照片')
   })
 })
