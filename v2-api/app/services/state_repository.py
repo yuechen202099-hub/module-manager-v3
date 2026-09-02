@@ -5776,6 +5776,21 @@ class PostgresStateRepository(StateRepository):
             filters.append(source.c.classification_status == query.classification_status)
         if query.has_photos:
             filters.append(source.c.photo_count > 0)
+        if query.only_unclassified_photos:
+            unclassified_photo_filter = (
+                select(literal(1))
+                .select_from(Photo)
+                .join(MaterialGroup, MaterialGroup.id == Photo.group_id)
+                .where(
+                    Photo.team_id == team_id,
+                    Photo.is_active.is_(True),
+                    Photo.upload_status != PhotoUploadStatus.INVALID,
+                    Photo.category == "unclassified",
+                    MaterialGroup.team_id == team_id,
+                    MaterialGroup.legacy_id == source.c.legacy_id,
+                )
+            )
+            filters.extend((source.c.kind == "group", unclassified_photo_filter.exists()))
         if query.barcode_eligibility != "all":
             required_count = len(REQUIRED_CATEGORIES)
             if query.barcode_eligibility == "eligible":

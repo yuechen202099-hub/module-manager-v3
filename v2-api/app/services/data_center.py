@@ -814,6 +814,8 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
             return False
     if query.has_photos and int(row.get("photo_count") or 0) <= 0:
         return False
+    if query.only_unclassified_photos and not row.get("_has_unclassified_photo"):
+        return False
     if query.barcode_eligibility != "all":
         eligible = bool(row.get("_barcode_eligible"))
         if query.barcode_eligibility == "eligible" and not eligible:

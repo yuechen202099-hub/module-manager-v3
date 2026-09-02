@@ -303,6 +303,17 @@ def test_data_center_route_ignores_retired_barcode_validation_filters(monkeypatc
     assert str(getattr(recorded, "activity_date_to", "")) == "2026-07-20"
 
 
+def test_data_center_route_passes_only_unclassified_photo_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches the UI filter being accepted but silently ignored by the data-center query."""
+    repo = RecordingRepository()
+    monkeypatch.setattr(group_routes, "state_repository", lambda: repo)
+
+    response = client.get("/groups/data-center?only_unclassified_photos=1", headers=admin_headers())
+
+    assert response.status_code == 200
+    assert repo.queries[-1].only_unclassified_photos is True
+
+
 def test_data_center_list_hides_retired_barcode_validation_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     class VisibilityRepository(RecordingRepository):
         def list_data_center_rows(self, query):
@@ -461,6 +472,30 @@ def test_json_data_center_combines_filters_with_stable_server_pagination(
     assert page["total"] == 22
     assert len(page["items"]) == 2
     assert [row["id"] for row in page["items"]] == ["group-002", "group-001"]
+
+
+def test_json_data_center_only_unclassified_photos_keeps_mixed_photo_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches groups with both classified and unclassified photos disappearing from the review queue."""
+    from app.schemas.data_center import DataCenterQuery
+
+    team_id = f"data-center-unclassified-{uuid4()}"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [
+        _group(1),
+        _group(2, categories=["module_meter", "unclassified"]),
+        _group(3, categories=["unclassified"]),
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    page = repository.JsonStateRepository().list_data_center_rows(
+        DataCenterQuery(data_type="group", only_unclassified_photos=True, page=1, page_size=20)
+    )
+
+    assert page["total"] == 2
+    assert [row["id"] for row in page["items"]] == ["group-003", "group-002"]
 
 
 def test_json_data_center_precise_dashboard_filters_are_not_approximate(
@@ -835,6 +870,49 @@ def test_postgres_data_center_uses_count_and_bounded_stable_row_query(monkeypatc
     assert "updated_at desc" in compiled[1]
     assert "nulls last" in compiled[1]
     assert "legacy_id desc" in compiled[1] or "material_groups.id desc" in compiled[1]
+
+
+def test_postgres_data_center_only_unclassified_photos_filters_count_and_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches pagination totals diverging from rows when the unclassified-photo filter is enabled."""
+    from app.schemas.data_center import DataCenterQuery
+
+    class ScalarResult:
+        def all(self):
+            return []
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return ScalarResult()
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    repo.list_data_center_rows(DataCenterQuery(only_unclassified_photos=True, page=1, page_size=20))
+
+    compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert len(compiled) == 2
+    assert all("category" in statement and "unclassified" in statement for statement in compiled)
 
 
 def test_postgres_meter_module_export_uses_one_unbounded_projection_query(
