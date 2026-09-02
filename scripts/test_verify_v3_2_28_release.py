@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_28_release.py"
+DATA_CENTER_UI_VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_0_data_center_ui.py"
 
 
 def load_script(path: Path, module_name: str):
@@ -50,6 +53,18 @@ def test_v3228_current_source_candidate_passes_its_release_contract() -> None:
     verifier = load_script(VERIFIER_PATH, "verify_v3_2_28_release_source")
 
     assert verifier.collect_failures(ROOT, "source") == []
+
+
+def test_data_center_ui_gate_matches_retired_barcode_contract() -> None:
+    result = subprocess.run(
+        [sys.executable, str(DATA_CENTER_UI_VERIFIER_PATH)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_v3228_source_contract_rejects_backend_containment_hidden_in_comments(tmp_path: Path) -> None:

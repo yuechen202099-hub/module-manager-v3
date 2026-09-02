@@ -25,7 +25,6 @@ def main() -> None:
     query_composable = read("v2-web/src/composables/useDataCenterQuery.ts")
     services = read("v2-web/src/api/services.ts")
     groups_route = read("v2-api/app/api/routes/groups.py")
-    data_center_service = read("v2-api/app/services/data_center.py")
     local_simulation = read("v2-api/app/services/local_simulation.py")
     state_repository = read("v2-api/app/services/state_repository.py")
     assert_contains(
@@ -54,7 +53,7 @@ def main() -> None:
     assert_contains(group_review_panel, ">保存</el-button>", "review panel must render one explicit save action")
     assert "重新扫码" not in group_review_panel, "review panel must not expose the retired full-photo rescan action"
     assert "async function manualConfirm()" not in group_review_panel, "review panel must not expose the retired separate manual-confirm action"
-    assert_contains(group_review_panel, "框选扫码", "review panel must expose region scan")
+    assert "框选扫码" not in group_review_panel, "review panel must not expose retired region scan"
     assert "完成审阅" not in group_review_panel, "ordinary complete-review action is forbidden in unified panel"
     assert_contains(query_composable, "router.replace", "query composable must synchronize filters into the URL")
     assert_contains(query_composable, "AbortController", "query composable must cancel stale data-center requests")
@@ -62,11 +61,11 @@ def main() -> None:
     assert_contains(query_composable, "terminalStatus", "query composable must track the terminal_status drilldown key")
     assert_contains(query_composable, "activityDateFrom", "query composable must track the activity-date start key")
     assert_contains(query_composable, "activityDateTo", "query composable must track the activity-date end key")
-    assert_contains(query_composable, "barcodeEligibility", "query composable must track exact barcode eligibility")
+    assert "barcodeEligibility" not in query_composable, "data center must not expose retired barcode eligibility filtering"
     assert_contains(query_composable, "installerSource", "query composable must track explicit installer source")
     assert_contains(filters, "exceptionOptions", "data center filters must expose exception status options")
     assert_contains(filters, "exceptionStatus", "data center exception status filter must sync through model")
-    assert_contains(filters, "barcodeEligibilityOptions", "data center filters must expose barcode eligibility options")
+    assert "barcodeEligibilityOptions" not in filters, "data center filters must not expose retired barcode eligibility options"
     assert_contains(filters, "installerSourceOptions", "data center filters must expose installer source options")
     assert_contains(
         query_composable,
@@ -95,16 +94,6 @@ def main() -> None:
     )
     assert_contains(
         services,
-        "barcode_status: query.barcodeStatus || 'all'",
-        "services must keep barcode_status as a first-class query contract",
-    )
-    assert_contains(
-        services,
-        "barcode_eligibility: query.barcodeEligibility || 'all'",
-        "services must forward exact barcode eligibility filters",
-    )
-    assert_contains(
-        services,
         "installer_source: query.installerSource || 'all'",
         "services must forward explicit installer source filters",
     )
@@ -130,53 +119,8 @@ def main() -> None:
     )
     assert_contains(
         groups_route,
-        "barcode_eligibility",
-        "backend route must accept exact barcode eligibility filters",
-    )
-    assert_contains(
-        groups_route,
         "installer_source",
         "backend route must accept explicit installer source filters",
-    )
-    assert_contains(
-        groups_route,
-        '"verified"',
-        "backend route must accept combined verified barcode drilldown status",
-    )
-    assert_contains(
-        groups_route,
-        '"needs_review"',
-        "backend route must accept combined needs_review barcode drilldown status",
-    )
-    assert_contains(
-        groups_route,
-        '"manual_confirmed"',
-        "backend route must preserve manual_confirmed as a single barcode filter",
-    )
-    assert_contains(
-        groups_route,
-        '"failed"',
-        "backend route must preserve failed as a single barcode filter",
-    )
-    assert_contains(
-        data_center_service,
-        '{"passed", "manual_confirmed"}',
-        "verified barcode filter must expand only to passed plus manual_confirmed",
-    )
-    assert_contains(
-        data_center_service,
-        '{"mismatched", "failed", "unreadable"}',
-        "needs_review barcode filter must expand only to mismatched, failed, and unreadable",
-    )
-    assert_contains(
-        data_center_service,
-        "has_current_eligible_photo_set",
-        "barcode eligibility must use the durable exact photo-set contract",
-    )
-    assert_contains(
-        data_center_service,
-        'durable_status != "not_eligible"',
-        "ineligible barcode drilldown must include durable not_eligible in addition to photo-set failures",
     )
     assert_contains(
         local_simulation,
@@ -219,40 +163,19 @@ def main() -> None:
         "PG installer distribution must trim and drop blank creators",
     )
     assert_contains(
-        state_repository,
-        'source.c.durable_barcode_status == "not_eligible"',
-        "PG ineligible barcode drilldown must union durable not_eligible",
-    )
-    assert_contains(
         services,
         "/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/classify",
         "services must expose data-center classify endpoint",
-    )
-    assert_contains(
-        services,
-        "/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/barcode-rescan",
-        "services must expose data-center barcode rescan endpoint",
-    )
-    assert_contains(
-        services,
-        "/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/region-scan",
-        "services must expose data-center region scan endpoint",
     )
     assert_contains(
         groups_route,
         '@router.post("/data-center/groups/{group_id}/photos/{photo_id}/classify")',
         "backend must expose admin data-center classify endpoint",
     )
-    assert_contains(
-        groups_route,
-        '@router.post("/data-center/groups/{group_id}/photos/{photo_id}/barcode-rescan")',
-        "backend must expose admin data-center barcode rescan endpoint",
-    )
-    assert_contains(
-        groups_route,
-        '@router.post("/data-center/groups/{group_id}/photos/{photo_id}/region-scan")',
-        "backend must expose admin data-center region scan endpoint",
-    )
+    assert "/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/barcode-rescan" not in services, "services must not expose retired data-center barcode rescan"
+    assert "/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/region-scan" not in services, "services must not expose retired data-center region scan"
+    assert '@router.post("/data-center/groups/{group_id}/photos/{photo_id}/barcode-rescan")' not in groups_route, "backend must not expose retired data-center barcode rescan"
+    assert '@router.post("/data-center/groups/{group_id}/photos/{photo_id}/region-scan")' not in groups_route, "backend must not expose retired data-center region scan"
     assert "classifyPhotoWithGroup" not in group_review_panel, "formal data-center panel must not use local-test classify"
     assert "rescanPhotoBarcode" not in group_review_panel, "formal data-center panel must not use local-test rescan"
     assert "scanGroupPhotoRegion" not in group_review_panel, "formal data-center panel must not use local-test region scan"
