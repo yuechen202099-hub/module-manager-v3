@@ -2,9 +2,9 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.27.zip`
-- Name: `module-manager-v2-server-3.2.27.zip`
-- Version: 3.2.27
+- Package: `build/server-release/module-manager-v2-server-3.2.28.zip`
+- Name: `module-manager-v2-server-3.2.28.zip`
+- Version: 3.2.28
 - Generated at: pending
 - Size: pending
 - SHA256: pending
@@ -17,11 +17,11 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.26 records, and the active V3.2.27 task-dispatch terminal material export contract
+- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.27 records, and the active V3.2.28 material-export containment contract
 - Nginx retirement patcher, server migration and manifest signer, Windows-local downloader, verifier tests, operator SOP, and release record
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
-- V3.2.27 preserves V3.2.26 background barcode retirement and adds no export worker, ZIP builder, or server-side export cache
-- V3.2.27 includes Alembic revision `20260901_0017` for durable export reservations, files, settings, and the global download lease
+- V3.2.28 preserves V3.2.27 data structures but temporarily rejects new export jobs and server photo streams while OSS direct download is implemented
+- V3.2.28 includes no database migration and keeps Alembic revision `20260901_0017` as the production head
 - Requirements and Dockerfile
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
 - Local static review images and the demo data seed script for pre-production smoke checks
@@ -53,13 +53,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.27 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.28 --phase source
 
 ## Verified Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- Historical release contracts plus the active V3.2.27 material-export, migration, package, and lifecycle contracts must pass
+- Historical release contracts plus the active V3.2.28 export-containment, package, and lifecycle contracts must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default

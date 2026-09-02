@@ -39,6 +39,10 @@ from app.services.material_export_stream import (
 
 
 router = APIRouter(prefix="/material-exports")
+MATERIAL_EXPORTS_TEMPORARILY_DISABLED = True
+MATERIAL_EXPORTS_TEMPORARILY_DISABLED_MESSAGE = (
+    "资料导出正在升级为 OSS 直连，服务器中转已暂时关闭"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +126,15 @@ def _error(request: Request, exc: Exception):
     raise exc
 
 
+def _temporarily_disabled(request: Request):
+    return error_response(
+        request,
+        "material_export_temporarily_disabled",
+        MATERIAL_EXPORTS_TEMPORARILY_DISABLED_MESSAGE,
+        status_code=503,
+    )
+
+
 def authorize_material_export_stream(
     *, identity: AdminIdentity, job_id: str, file_id: str, lease_token: str
 ) -> MaterialExportFileSnapshot:
@@ -201,6 +214,8 @@ def reserve_job(
     request: Request,
     admin_payload: dict = Depends(require_admin),
 ):
+    if MATERIAL_EXPORTS_TEMPORARILY_DISABLED:
+        return _temporarily_disabled(request)
     identity = admin_identity(request=request, admin_payload=admin_payload)
     try:
         with SessionLocal.begin() as session:
@@ -360,6 +375,8 @@ def stream_file(
     lease_token: str = Header(alias="X-Material-Export-Lease"),
     admin_payload: dict = Depends(require_admin),
 ):
+    if MATERIAL_EXPORTS_TEMPORARILY_DISABLED:
+        return _temporarily_disabled(request)
     identity = admin_identity(request=request, admin_payload=admin_payload)
     try:
         file_snapshot = authorize_material_export_stream(

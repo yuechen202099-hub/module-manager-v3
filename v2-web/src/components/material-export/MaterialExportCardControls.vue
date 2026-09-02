@@ -8,6 +8,7 @@ const props = defineProps<{
   selected: boolean
   disabled: boolean
   busy: boolean
+  exportEnabled: boolean
 }>()
 
 const emit = defineEmits<{
@@ -23,7 +24,7 @@ function countChanged(value: number | undefined) {
 
 <template>
   <div class="material-export-card" data-testid="material-export-card">
-    <ElCheckbox :model-value="selected" :disabled="disabled || busy" @change="emit('selected', Boolean($event))">导出</ElCheckbox>
+    <ElCheckbox v-if="exportEnabled" :model-value="selected" :disabled="disabled || busy" @change="emit('selected', Boolean($event))">导出</ElCheckbox>
     <label>
       <span>应还采集器</span>
       <ElInputNumber
@@ -38,7 +39,18 @@ function countChanged(value: number | undefined) {
       />
     </label>
     <small v-if="summary">最终 {{ summary.finalCollectorCount }} 个</small>
-    <ElButton size="small" type="success" plain :loading="busy" :disabled="disabled" @click="emit('export')">导出资料</ElButton>
+    <ElButton
+      v-if="exportEnabled"
+      data-testid="material-export-card-action"
+      size="small"
+      type="success"
+      plain
+      :loading="busy"
+      :disabled="disabled"
+      @click="emit('export')"
+    >
+      导出资料
+    </ElButton>
   </div>
 </template>
 

@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.28',
+    date: '2026-09-02',
+    type: 'BUG 修复',
+    title: '资料导出服务器中转紧急止损',
+    items: [
+      '任务派发页暂时关闭单终端和批量资料导出入口，保留应还采集器数量设置。',
+      '后端拒绝新建导出任务，并在读取照片前拒绝旧的服务器照片流请求。',
+      '现有采集器分配、导出记录和施工资料不修改，后续改为浏览器凭短时签名直接从 OSS 下载。',
+    ],
+  },
+  {
     version: 'V3.2.27',
     date: '2026-09-02',
     type: '大更新',

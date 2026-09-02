@@ -13,6 +13,7 @@ import { useAuthStore } from '@/stores/auth'
 import { createMutationGuardedRequestGate, isAbortError } from '@/utils/latestRequestGate.mjs'
 
 const TASK_STATUS_REFRESH_INTERVAL_MS = 15 * 60 * 1000
+const MATERIAL_EXPORT_ENABLED = false
 
 type TaskFilter = 'all' | 'priority' | 'construction' | 'completed'
 
@@ -374,6 +375,14 @@ onUnmounted(() => {
 
     <ElAlert v-if="errorMessage" class="claim-alert" type="error" :closable="false" :title="errorMessage" />
     <ElAlert v-if="isAdmin && materialExport.error.value" class="claim-alert" type="warning" :closable="false" :title="materialExport.error.value" />
+    <ElAlert
+      v-if="isAdmin && !MATERIAL_EXPORT_ENABLED"
+      data-testid="material-export-disabled-notice"
+      class="claim-alert"
+      type="info"
+      :closable="false"
+      title="资料导出暂时关闭，正在切换为浏览器直连 OSS；应还采集器数量仍可设置"
+    />
 
     <div class="claim-summary">
       <article class="metric">
@@ -402,7 +411,7 @@ onUnmounted(() => {
         </div>
         <div class="claim-task-heading-actions">
           <MaterialExportToolbar
-            v-if="isAdmin"
+            v-if="isAdmin && MATERIAL_EXPORT_ENABLED"
             :selected-count="materialExport.selectedCount.value"
             :all-selected="allVisibleExportSelected"
             :running="materialExport.running.value"
@@ -516,6 +525,7 @@ onUnmounted(() => {
               :selected="materialExport.isSelected(task.id)"
               :disabled="taskUploadedGroups(task) <= 0"
               :busy="materialExport.running.value"
+              :export-enabled="MATERIAL_EXPORT_ENABLED"
               @selected="materialExport.setSelected(task.id, $event)"
               @count="updateExportCollectorCount(task, $event)"
               @export="startMaterialExport([task.id])"

@@ -395,6 +395,15 @@ V3227_CONTRACT_INPUTS = frozenset(
     }
 )
 
+V3228_CONTRACT_INPUTS = frozenset(
+    set(V3227_CONTRACT_INPUTS)
+    | {
+        "ops/releases/V3.2.28.md",
+        "scripts/verify_v3_2_28_release.py",
+        "scripts/test_verify_v3_2_28_release.py",
+    }
+)
+
 V3226_RETIRED_BACKGROUND_BARCODE_FILES = frozenset(
     {
         "infra/module-manager-v2-photo-barcode-maintenance.service",
@@ -823,11 +832,26 @@ def required_files_for_version(version: str) -> frozenset[str]:
             )
             - V3226_RETIRED_BACKGROUND_BARCODE_FILES
         )
+    if version == "3.2.28":
+        return frozenset(
+            (
+                REQUIRED_FILES
+                | V3221_CONTRACT_INPUTS
+                | V3222_CONTRACT_INPUTS
+                | V3223_CONTRACT_INPUTS
+                | V3224_CONTRACT_INPUTS
+                | V3225_CONTRACT_INPUTS
+                | V3226_CONTRACT_INPUTS
+                | V3227_CONTRACT_INPUTS
+                | V3228_CONTRACT_INPUTS
+            )
+            - V3226_RETIRED_BACKGROUND_BARCODE_FILES
+        )
     fail(f"Release manifest Version must match a supported archived source contract: {version}")
 
 
 def forbidden_files_for_version(version: str) -> frozenset[str]:
-    if version in {"3.2.26", "3.2.27"}:
+    if version in {"3.2.26", "3.2.27", "3.2.28"}:
         return V3226_RETIRED_BACKGROUND_BARCODE_FILES
     return frozenset()
 
@@ -1459,6 +1483,31 @@ def verify_v3227_archive_source_contract(archive: zipfile.ZipFile):
         return module
 
 
+def verify_v3228_archive_source_contract(archive: zipfile.ZipFile):
+    with tempfile.TemporaryDirectory(prefix="module-manager-v3228-contract-") as temporary_root:
+        extracted_root = Path(temporary_root)
+        migration_members = {
+            name
+            for name in archive.namelist()
+            if PurePosixPath(name).parent.as_posix() == "v2-api/alembic/versions"
+            and PurePosixPath(name).suffix == ".py"
+        }
+        for relative_path in V3228_CONTRACT_INPUTS | migration_members:
+            target = extracted_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(relative_path))
+        verifier_path = extracted_root / "scripts" / "verify_v3_2_28_release.py"
+        spec = importlib.util.spec_from_file_location("archive_v3228_release_contract", verifier_path)
+        if spec is None or spec.loader is None:
+            fail("Unable to load archived V3.2.28 release verifier")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        failures = module.collect_failures(extracted_root, "source")
+        if failures:
+            fail("V3.2.28 archive source contract failed: " + " | ".join(failures))
+        return module
+
+
 def fail(message: str) -> None:
     raise AssertionError(message)
 
@@ -1791,10 +1840,10 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         ):
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
-        if package_version not in {"3.2.8", "3.2.10", "3.2.11", "3.2.12", "3.2.13", "3.2.14", "3.2.15", "3.2.16", "3.2.17", "3.2.18", "3.2.19", "3.2.20", "3.2.21", "3.2.22", "3.2.23", "3.2.24", "3.2.25", "3.2.26", "3.2.27"}:
+        if package_version not in {"3.2.8", "3.2.10", "3.2.11", "3.2.12", "3.2.13", "3.2.14", "3.2.15", "3.2.16", "3.2.17", "3.2.18", "3.2.19", "3.2.20", "3.2.21", "3.2.22", "3.2.23", "3.2.24", "3.2.25", "3.2.26", "3.2.27", "3.2.28"}:
             fail(
                 "Release manifest Version must match a supported archived source contract: "
-                "3.2.8, 3.2.10, 3.2.11, 3.2.12, 3.2.13, 3.2.14, 3.2.15, 3.2.16, 3.2.17, 3.2.18, 3.2.19, 3.2.20, 3.2.21, 3.2.22, 3.2.23, 3.2.24, 3.2.25, 3.2.26, or 3.2.27"
+                "3.2.8, 3.2.10, 3.2.11, 3.2.12, 3.2.13, 3.2.14, 3.2.15, 3.2.16, 3.2.17, 3.2.18, 3.2.19, 3.2.20, 3.2.21, 3.2.22, 3.2.23, 3.2.24, 3.2.25, 3.2.26, 3.2.27, or 3.2.28"
             )
         required_files = required_files_for_version(package_version)
         missing = sorted(required_files - names)
@@ -1914,7 +1963,9 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         candidate_version,
     )
     with zipfile.ZipFile(zip_path) as archive:
-        if package_version == "3.2.27":
+        if package_version == "3.2.28":
+            archived_release = verify_v3228_archive_source_contract(archive)
+        elif package_version == "3.2.27":
             archived_release = verify_v3227_archive_source_contract(archive)
         elif package_version == "3.2.26":
             archived_release = verify_v3226_archive_source_contract(archive)
