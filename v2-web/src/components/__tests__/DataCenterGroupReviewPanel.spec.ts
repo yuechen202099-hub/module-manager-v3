@@ -977,6 +977,88 @@ describe('DataCenterGroupReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('classifies four unclassified photos in the fixed review order with one action', async () => {
+    const classificationDetail = {
+      ...detailFixture('g-sequential-classification'),
+      classificationStatus: 'pending',
+      photoCount: 4,
+      photos: [
+        { id: 'photo-before', url: '', name: 'photo-before', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+        { id: 'photo-collector', url: '', name: 'photo-collector', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+        { id: 'photo-module', url: '', name: 'photo-module', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+        { id: 'photo-after', url: '', name: 'photo-after', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(classificationDetail)
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+
+    const wrapper = mountPanel({ groupId: classificationDetail.id, classificationOnly: true })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="classify-unclassified-in-order"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenNthCalledWith(
+      1,
+      classificationDetail.id,
+      'photo-before',
+      'before_box',
+      '审阅与翻拍顺序分类',
+    )
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenNthCalledWith(
+      2,
+      classificationDetail.id,
+      'photo-collector',
+      'collector_barcode',
+      '审阅与翻拍顺序分类',
+    )
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenNthCalledWith(
+      3,
+      classificationDetail.id,
+      'photo-module',
+      'module_meter',
+      '审阅与翻拍顺序分类',
+    )
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenNthCalledWith(
+      4,
+      classificationDetail.id,
+      'photo-after',
+      'after_box',
+      '审阅与翻拍顺序分类',
+    )
+    wrapper.unmount()
+  })
+
+  it('stops the one-click sequence when an unclassified photo cannot be saved', async () => {
+    const classificationDetail = {
+      ...detailFixture('g-sequential-classification-failure'),
+      classificationStatus: 'pending',
+      photos: [
+        { id: 'photo-before', url: '', name: 'photo-before', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+        { id: 'photo-collector', url: '', name: 'photo-collector', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(classificationDetail)
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+    apiMock.classifyDataCenterGroupPhoto.mockRejectedValueOnce(new Error('照片分类保存失败'))
+
+    const wrapper = mountPanel({ groupId: classificationDetail.id, classificationOnly: true })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="classify-unclassified-in-order"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenCalledTimes(1)
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenCalledWith(
+      classificationDetail.id,
+      'photo-before',
+      'before_box',
+      '审阅与翻拍顺序分类',
+    )
+    expect(wrapper.text()).toContain('照片分类 0/2')
+    wrapper.unmount()
+  })
+
   it('allows an administrator to manually confirm classification and warns when anomalies remain', async () => {
     const classificationDetail = {
       ...detailFixture('g-manual-classification'),

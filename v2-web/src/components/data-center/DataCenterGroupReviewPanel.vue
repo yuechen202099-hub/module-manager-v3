@@ -108,6 +108,8 @@ const classificationChanges = computed(() => detail.value?.photos.flatMap((photo
     ? [{ photoId: photo.id, category }]
     : []
 }) || [])
+const unclassifiedPhotos = computed(() => detail.value?.photos
+  .filter((photo) => !classificationCategoryValues.has(photo.category || 'unclassified')) || [])
 const hasManualClassificationConfirmation = computed(
   () => Boolean(detail.value?.classificationManualConfirmation),
 )
@@ -356,6 +358,36 @@ async function saveClassifications() {
     await reloadAfterMutation(owner)
   } catch (error) {
     showMutationError(owner, error, '分类保存失败')
+  } finally {
+    finishMutation(owner)
+  }
+}
+
+async function classifyUnclassifiedInOrder() {
+  if (!detail.value || !unclassifiedPhotos.value.length) return
+  const currentDetail = detail.value
+  const changes = unclassifiedPhotos.value
+    .slice(0, classificationCategoryOptions.length)
+    .map((photo, index) => ({
+      photoId: photo.id,
+      category: classificationCategoryOptions[index]!.value,
+    }))
+  const owner = beginMutation(currentDetail.id)
+  try {
+    for (const change of changes) {
+      await classifyDataCenterGroupPhoto(
+        currentDetail.id,
+        change.photoId,
+        change.category,
+        '审阅与翻拍顺序分类',
+      )
+      if (!isCurrentMutation(owner)) return
+    }
+    ElMessage.success(`已按顺序分类 ${changes.length} 张照片`)
+    await reloadAfterMutation(owner)
+  } catch (error) {
+    await reloadAfterMutation(owner)
+    showMutationError(owner, error, '顺序分类失败')
   } finally {
     finishMutation(owner)
   }
@@ -762,6 +794,13 @@ onBeforeUnmount(cleanupDetail)
       <div class="classification-actions">
         <button
           type="button"
+          class="classify-unclassified-in-order"
+          data-testid="classify-unclassified-in-order"
+          :disabled="saving || !unclassifiedPhotos.length"
+          @click="classifyUnclassifiedInOrder"
+        >{{ saving ? '正在顺序分类' : '一键按顺序分类未分类照片' }}</button>
+        <button
+          type="button"
           class="save-classifications"
           data-testid="save-photo-classifications"
           :disabled="saving || !classificationChanges.length"
@@ -894,6 +933,16 @@ onBeforeUnmount(cleanupDetail)
           >{{ item.label }}</el-button>
         </div>
 
+        <div class="action-strip">
+          <el-button
+            type="primary"
+            plain
+            :disabled="saving || !unclassifiedPhotos.length"
+            data-testid="classify-unclassified-in-order"
+            @click="classifyUnclassifiedInOrder"
+          >一键按顺序分类未分类照片</el-button>
+        </div>
+
         <div class="decision-strip">
           <el-button type="success" :loading="saving" @click="decideReview('approved')">正式通过</el-button>
           <el-button type="warning" :loading="saving" @click="decideReview('incomplete')">资料不全</el-button>
@@ -997,10 +1046,11 @@ onBeforeUnmount(cleanupDetail)
 .classification-photo-card > span { white-space: nowrap; font-size: 12px; }
 .classification-photo-card > span.classified { color: var(--el-color-success, #67c23a); }
 .classification-photo-card > span.unclassified { color: var(--el-color-warning, #e6a23c); }
+.classify-unclassified-in-order { min-width: 176px; min-height: 36px; padding: 0 18px; border: 1px solid var(--el-color-warning, #e6a23c); border-radius: 6px; background: #fff; color: var(--el-color-warning-dark-2, #b88230); cursor: pointer; }
 .save-classifications { justify-self: center; min-width: 92px; min-height: 36px; padding: 0 18px; border: 1px solid var(--v2-accent, #1677ff); border-radius: 6px; background: var(--v2-accent, #1677ff); color: #fff; cursor: pointer; }
 .classification-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
 .confirm-classification-complete { min-width: 154px; min-height: 36px; padding: 0 18px; border: 1px solid var(--el-color-success, #67c23a); border-radius: 6px; background: #fff; color: var(--el-color-success-dark-2, #529b2e); cursor: pointer; }
-.save-classifications:disabled, .confirm-classification-complete:disabled { cursor: not-allowed; opacity: .55; }
+.classify-unclassified-in-order:disabled, .save-classifications:disabled, .confirm-classification-complete:disabled { cursor: not-allowed; opacity: .55; }
 .review-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr); gap: 14px; min-height: 640px; }
 .photo-pane, .review-pane { display: grid; align-content: start; gap: 10px; min-width: 0; }
 .source-stage { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; }
