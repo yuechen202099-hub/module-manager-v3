@@ -122,7 +122,7 @@ def _review_headers(*, username: str, role: str, team_id: str) -> dict[str, str]
     return {"Authorization": f"bearer {token}"}
 
 
-def test_data_center_anomalies_are_chinese_specific_and_ignore_missing_collector_photo() -> None:
+def test_data_center_anomalies_keep_module_evidence_but_ignore_disabled_barcode_verification() -> None:
     group = deepcopy(_review_state("anomaly-team")["groups"][0])
     group.update(
         {
@@ -155,9 +155,9 @@ def test_data_center_anomalies_are_chinese_specific_and_ignore_missing_collector
     messages = {item["message"] for item in anomalies}
 
     assert "缺少模块号" in messages
-    assert "表号与照片识别结果不一致" in messages
-    assert "模块号与台账不一致" in messages
-    assert "条码识别未通过" in messages
+    assert "表号与照片识别结果不一致" not in messages
+    assert "模块号与台账不一致" not in messages
+    assert "条码识别未通过" not in messages
     assert "缺采集器照片" not in messages
     assert "缺少采集器照片" not in messages
     assert "缺少模块资产编号" not in messages
@@ -623,7 +623,7 @@ def test_manual_classification_confirmation_requires_anomaly_acknowledgement_and
     assert result["status"] == "approved"
     assert confirmation["actor"] == "admin-a"
     assert confirmation["acknowledged_anomalies"] is True
-    assert confirmation["anomalies"] == ["unclassified_photos", "barcode_verification_required"]
+    assert confirmation["anomalies"] == ["unclassified_photos"]
     assert confirmation["photo_snapshot"][0] == {
         "photo_id": "p1",
         "category": "unclassified",
@@ -1144,7 +1144,7 @@ def test_json_data_center_edit_replaces_stale_construction_module_when_source_al
     assert _latest_group()["construction_module_asset_no"] == "MOD099"
 
 
-def test_json_data_center_classifies_final_photo_then_auto_archives_without_delivery_enqueue(
+def test_json_data_center_classifies_final_photo_without_barcode_validation_or_auto_archive(
     json_review_repo: repository.JsonStateRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1165,9 +1165,13 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_without_deli
     group["photos"][3]["archive_status"] = "pending"
     group["delivery_cache_status"] = "pending"
     state["delivery_package_jobs"] = []
-    _mark_future_authoritative_barcode_pass(group, photo_id="p4", category="after_box")
     original_begin = local_simulation.begin_authoritative_json_write
     nested_begin_attempts = 0
+
+    def reject_retired_barcode_validation(*_args, **_kwargs):
+        pytest.fail("data-center photo classification must not run retired barcode validation")
+
+    monkeypatch.setattr(repository.photo_barcode_check, "check_photo_barcode", reject_retired_barcode_validation)
 
     def fail_on_nested_write(team_id: str | None = None):
         nonlocal nested_begin_attempts
@@ -1192,10 +1196,10 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_without_deli
     delivery_jobs = committed_state["delivery_cache_jobs"]
     package_jobs = committed_state["delivery_package_jobs"]
 
-    assert result["archive_status"] == "archived"
-    assert group["status"] == "approved"
-    assert group["barcode_verification"]["auto_archive_status"] == "archived"
-    assert all(photo["archive_status"] == "archived" for photo in group["photos"])
+    assert result["archive_status"] == "unarchived"
+    assert group["status"] == "pending"
+    assert group["photos"][-1]["archive_status"] == "archived"
+    assert any(photo["archive_status"] != "archived" for photo in group["photos"][:-1])
     assert delivery_jobs == []
     assert package_jobs == []
     assert nested_begin_attempts == 0
@@ -1208,7 +1212,7 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_without_deli
     assert payload["after"]["category"] == "after_box"
 
 
-def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
+def test_manual_confirmation_requires_reason_but_keeps_terminal_unarchived_until_manual_archive(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
     state = local_simulation.get_state()
@@ -1243,8 +1247,8 @@ def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
     group = _latest_group()
 
     assert result["barcode_status"] == "manual_confirmed"
-    assert result["archive_status"] == "archived"
-    assert group["status"] == "approved"
+    assert result["archive_status"] == "unarchived"
+    assert group["status"] == "pending"
     assert local_simulation.get_state()["delivery_cache_jobs"] == delivery_history["delivery_cache_jobs"]
     assert local_simulation.get_state()["delivery_package_jobs"] == delivery_history["delivery_package_jobs"]
     payload = _audit_payload("group_barcode_manual_confirmed")
@@ -1254,6 +1258,99 @@ def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
     assert payload["reason"] == "现场照片与台账一致"
     assert "before" in payload
     assert "after" in payload
+
+
+def test_json_manual_archive_archives_only_eligible_terminal_and_keeps_collector_photo_optional(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches grouping photo classification with terminal-level archival."""
+    group = _latest_group()
+    group["collector"] = ""
+    group["construction_collector"] = ""
+    group["photos"] = [
+        _photo("p-module", "module_meter", "a", archive_status="archived"),
+        _photo("p-after", "after_box", "b", archive_status="archived"),
+    ]
+    group["photo_count"] = 2
+
+    result = json_review_repo.manual_archive_data_center_group(
+        "g-1",
+        actor="admin-a",
+        source_page="review_rephoto_workbench",
+    )
+
+    assert result["archive_status"] == "archived"
+    assert _latest_group()["archive_status"] == "archived"
+    assert _latest_group()["status"] == "approved"
+    payload = _audit_payload("data_center_group_manually_archived")
+    assert payload["source_page"] == "review_rephoto_workbench"
+    assert payload["actor"] == "admin-a"
+
+
+def test_json_manual_archive_rejects_module_channel_conflict_without_changing_archive_state(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches archival of a terminal whose two allowed module sources disagree."""
+    group = _latest_group()
+    group["construction_module_asset_no"] = "MOD002"
+    before = deepcopy(group)
+
+    with pytest.raises(ValueError, match="模块号"):
+        json_review_repo.manual_archive_data_center_group(
+            "g-1",
+            actor="admin-a",
+            source_page="review_rephoto_workbench",
+        )
+
+    assert group == before
+
+
+def test_json_first_pass_archive_uses_the_manual_gate_and_records_system_audit(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches a recurring worker archive instead of one controlled first-pass scan."""
+    state = local_simulation.get_state()
+    blocked = deepcopy(_latest_group())
+    blocked["id"] = "g-blocked"
+    blocked["meter_no"] = "110000288057"
+    blocked["module_asset_no"] = ""
+    blocked["construction_module_asset_no"] = ""
+    state["groups"].append(blocked)
+
+    result = json_review_repo.first_pass_archive_data_center_groups(
+        actor="system-first-pass-archive",
+    )
+
+    assert result["scanned_count"] == 2
+    assert result["archived_group_ids"] == ["g-1"]
+    assert result["archived_count"] == 1
+    assert result["skipped"] == [{"group_id": "g-blocked", "reason": "缺少模块号"}]
+    assert _latest_group()["archive_status"] == "archived"
+    assert blocked["archive_status"] != "archived"
+    payload = _audit_payload("data_center_group_first_pass_archived")
+    assert payload["source_page"] == "system_first_pass_archive"
+    assert payload["actor"] == "system-first-pass-archive"
+
+
+def test_admin_manual_archive_route_uses_server_actor(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches a client-controlled archive action or a missing administrator-only route."""
+    team_id = local_simulation.get_state()["team_id"]
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+
+    response = client.post(
+        "/groups/data-center/groups/g-1/archive",
+        headers=_review_headers(username="archive-admin", role="admin", team_id=team_id),
+        json={"source_page": "review_rephoto_workbench"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["archive_status"] == "archived"
+    payload = _audit_payload("data_center_group_manually_archived")
+    assert payload["actor"] == "archive-admin"
 
 
 def test_unmatched_finalize_rejects_placeholder_or_ambiguous_target(

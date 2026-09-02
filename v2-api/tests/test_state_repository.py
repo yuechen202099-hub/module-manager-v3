@@ -6594,10 +6594,11 @@ def test_postgres_data_center_rescan_rejects_unsupported_category_before_transac
     assert audits == []
 
 
-def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_without_claim(
+def test_postgres_data_center_classifies_final_photo_without_barcode_validation_or_auto_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import delivery_cache
+    from app.services import group_barcode_verification
 
     events: list[object] = []
     audits: list[dict[str, object]] = []
@@ -6611,6 +6612,12 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
         audits.append(kwargs)
 
     monkeypatch.setattr(repository, "_stage_transactional_audit", fake_stage_audit)
+
+    def reject_retired_barcode_validation(*_args, **_kwargs):
+        pytest.fail("data-center photo classification must not run retired barcode validation")
+
+    monkeypatch.setattr(repository.photo_barcode_check, "check_photo_barcode", reject_retired_barcode_validation)
+    monkeypatch.setattr(group_barcode_verification, "evaluate_group_eligibility", reject_retired_barcode_validation)
     group = SimpleNamespace(
         id="group-uuid",
         team_id="alpha-team",
@@ -6681,49 +6688,6 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
         make_photo("p-4", "unclassified", "d"),
     ]
     target_photo = photos[-1]
-    future_payload = {
-        **group.raw_data,
-        "id": group.legacy_id,
-        "terminal": group.terminal,
-        "meter_no": group.display_meter_no,
-        "meter_match_key": group.meter_match_key,
-        "photos": [
-            {
-                "id": photo.legacy_id,
-                "category": "after_box" if photo is target_photo else photo.category,
-                "sha256": photo.sha256,
-                "upload_status": "uploaded",
-                "is_active": True,
-            }
-            for photo in photos
-        ],
-    }
-    eligibility = evaluate_group_eligibility(future_payload)
-    assert eligibility.status == "pending"
-    verification = SimpleNamespace(
-        id="verification-uuid",
-        team_id="alpha-team",
-        group_id="group-uuid",
-        status="passed",
-        evidence_fingerprint=eligibility.evidence_fingerprint,
-        evidence_version=3,
-        meter_matched=True,
-        module_matched=True,
-        collector_matched=True,
-        recognition_source="machine_barcode",
-        result={
-            "passed_count": 3,
-            "matched_fields": ["meter", "module", "collector"],
-            "missing_fields": [],
-            "machine_barcode_values": ["110000288056", "MOD001", "COLLECTOR001"],
-        },
-        auto_archive_status="pending",
-        auto_archive_attempt_count=0,
-        auto_archive_lease_owner=None,
-        auto_archive_lease_token=None,
-        auto_archive_lease_expires_at=None,
-        auto_archive_error=None,
-    )
 
     class FakeScalarResult:
         def all(self):
@@ -6742,7 +6706,7 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
 
         def scalar(self, _statement):
             self.scalar_calls += 1
-            return target_photo if self.scalar_calls == 1 else verification
+            return target_photo
 
         def scalars(self, _statement):
             return FakeScalarResult()
@@ -6780,10 +6744,7 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
             actor: str,
             reason: str,
         ) -> str:
-            assert checked_group is group
-            assert group_payload["id"] == "g-1"
-            events.append(("stage-delivery", actor, reason, session.commits))
-            return "pending"
+            pytest.fail("data-center photo classification must not enqueue an automatic archive")
 
     result = TestPostgresRepository().classify_data_center_group_photo(
         "g-1",
@@ -6794,14 +6755,14 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
         source_page="data_center",
     )
 
-    assert result["archive_status"] == "archived"
-    assert group.status == repository.GroupStatus.APPROVED
-    assert group.raw_data["archive_status"] == "archived"
+    assert result["archive_status"] == "unarchived"
+    assert group.status == repository.GroupStatus.UNREVIEWED
+    assert group.raw_data["archive_status"] == "pending"
     assert "classification_manual_confirmation" not in group.raw_data
-    assert verification.auto_archive_status == "archived"
-    assert all(photo.archive_status == "archived" for photo in photos)
-    assert events == ["invalidate", ("stage-delivery", "admin-a", "data_center_auto_archive", 0), "commit"]
-    assert result["delivery_package_job_status"] == "pending"
+    assert target_photo.archive_status == "archived"
+    assert all(photo.archive_status == "pending" for photo in photos[:-1])
+    assert events == ["invalidate", "commit"]
+    assert result["delivery_package_job_status"] == ""
     audit = next(item for item in audits if item["action"] == "data_center_photo_classified")
     revoked = next(
         item
@@ -6946,7 +6907,7 @@ def test_postgres_manual_classification_confirmation_is_transactional_and_audite
     assert len(audit["payload"]["photo_snapshot"]) == 4
 
 
-def test_postgres_data_center_classify_rolls_back_archive_when_commit_fails(
+def test_postgres_data_center_classify_rolls_back_photo_change_when_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import delivery_cache
@@ -7126,9 +7087,7 @@ def test_postgres_data_center_classify_rolls_back_archive_when_commit_fails(
             actor: str,
             reason: str,
         ) -> str:
-            assert checked_group is group
-            events.append(("stage-delivery", actor, reason))
-            return "pending"
+            pytest.fail("data-center photo classification must not enqueue an automatic archive")
 
     with pytest.raises(RuntimeError, match="injected postgres commit failure"):
         TestPostgresRepository().classify_data_center_group_photo(
@@ -7144,7 +7103,7 @@ def test_postgres_data_center_classify_rolls_back_archive_when_commit_fails(
     assert vars(group) == group_before
     assert [vars(photo) for photo in photos] == photos_before
     assert vars(verification) == verification_before
-    assert events == ["invalidate", ("stage-delivery", "admin-a", "data_center_auto_archive")]
+    assert events == ["invalidate"]
 
 
 def test_postgres_data_center_manual_confirm_bypasses_review_claim_and_audits_source(

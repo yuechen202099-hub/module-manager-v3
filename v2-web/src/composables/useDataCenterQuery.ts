@@ -3,8 +3,6 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { fetchDataCenterRows } from '@/api/services'
 import type {
-  DataCenterBarcodeFilterStatus,
-  DataCenterBarcodeEligibility,
   DataCenterDataType,
   DataCenterInstallerSource,
   DataCenterPageSize,
@@ -21,8 +19,6 @@ export interface DataCenterRouteQuery {
   constructionStatus: string
   terminalStatus: DataCenterTerminalFilterStatus
   archiveStatus: string
-  barcodeStatus: DataCenterBarcodeFilterStatus
-  barcodeEligibility: DataCenterBarcodeEligibility
   classificationStatus: string
   exceptionStatus: string
   installer: string
@@ -46,8 +42,6 @@ const DEFAULT_QUERY: DataCenterRouteQuery = {
   constructionStatus: 'all',
   terminalStatus: 'all',
   archiveStatus: 'all',
-  barcodeStatus: 'all',
-  barcodeEligibility: 'all',
   classificationStatus: 'all',
   exceptionStatus: '',
   installer: '',
@@ -77,8 +71,6 @@ function routeQueryToState(query: Record<string, unknown>): DataCenterRouteQuery
   const page = Math.max(1, Math.floor(Number(first(query.page)) || 1))
   const dataType = first(query.data_type || query.dataType)
   const terminalStatus = first(query.terminal_status || query.terminalStatus)
-  const barcodeStatus = first(query.barcode_status || query.barcodeStatus)
-  const barcodeEligibility = first(query.barcode_eligibility || query.barcodeEligibility)
   const installerSource = first(query.installer_source || query.installerSource)
   return {
     page,
@@ -89,12 +81,6 @@ function routeQueryToState(query: Record<string, unknown>): DataCenterRouteQuery
       ? terminalStatus as DataCenterTerminalFilterStatus
       : 'all',
     archiveStatus: first(query.archive_status || query.archiveStatus) || 'all',
-    barcodeStatus: ['all', 'passed', 'manual', 'manual_confirmed', 'mismatched', 'failed', 'unreadable', 'ineligible', 'verified', 'needs_review'].includes(barcodeStatus)
-      ? barcodeStatus as DataCenterBarcodeFilterStatus
-      : 'all',
-    barcodeEligibility: ['all', 'eligible', 'ineligible'].includes(barcodeEligibility)
-      ? barcodeEligibility as DataCenterBarcodeEligibility
-      : 'all',
     classificationStatus: first(query.classification_status || query.classificationStatus) || 'all',
     exceptionStatus: first(query.exception_status || query.exceptionStatus),
     installer: first(query.installer),
@@ -121,8 +107,6 @@ function serializeQuery(state: DataCenterRouteQuery) {
     ['constructionStatus', 'construction_status', state.constructionStatus],
     ['terminalStatus', 'terminal_status', state.terminalStatus],
     ['archiveStatus', 'archive_status', state.archiveStatus],
-    ['barcodeStatus', 'barcode_status', state.barcodeStatus],
-    ['barcodeEligibility', 'barcode_eligibility', state.barcodeEligibility],
     ['classificationStatus', 'classification_status', state.classificationStatus],
     ['exceptionStatus', 'exception_status', state.exceptionStatus],
     ['installer', 'installer', state.installer],
@@ -169,17 +153,17 @@ export function useDataCenterQuery() {
       address: '',
       collector: '',
       moduleAssetNo: '',
+      moduleSourceValues: { initialImport: [], construction: [] },
       constructionCollector: '',
       constructionModuleAssetNo: '',
       installer: '',
       photoCount: 0,
       classificationStatus: '',
       classificationProgress: {},
-      barcodeStatus: '',
-      barcodeProgress: {},
-      groupBarcodeMissingFields: [],
       constructionStatus: '',
       archiveStatus: '',
+      archiveReady: false,
+      archiveBlockers: [],
       exceptionStatus: '',
       reviewStatus: 'pending',
       updatedAt: '',
@@ -223,8 +207,6 @@ export function useDataCenterQuery() {
         constructionStatus: query.constructionStatus,
         terminalStatus: query.terminalStatus,
         archiveStatus: query.archiveStatus,
-        barcodeStatus: query.barcodeStatus,
-        barcodeEligibility: query.barcodeEligibility,
         classificationStatus: query.classificationStatus,
         exceptionStatus: query.exceptionStatus,
         installer: query.installer,

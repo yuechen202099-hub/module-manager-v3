@@ -67,6 +67,14 @@ def test_data_center_rejects_unsupported_page_sizes(monkeypatch: pytest.MonkeyPa
     assert response.status_code == 422
 
 
+def test_data_center_openapi_exposes_only_two_archive_statuses() -> None:
+    """Prevents the retired pending archive state returning to the public data-center API."""
+    operation = create_app().openapi()["paths"]["/groups/data-center"]["get"]
+    archive_parameter = next(parameter for parameter in operation["parameters"] if parameter["name"] == "archive_status")
+
+    assert archive_parameter["schema"]["enum"] == ["all", "unarchived", "archived"]
+
+
 def test_data_center_route_requires_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(group_routes, "state_repository", lambda: RecordingRepository())
 
@@ -93,6 +101,7 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
                     "meter_no": "METER-001",
                     "module_asset_no": "MODULE-001",
                     "module_source": "原始资料、照片记录",
+                    "ingested_at": "2026-09-02T08:30:00+00:00",
                     "occurrence_count": 4,
                     "is_duplicate": "否",
                     "duplicate_type": "无",
@@ -106,6 +115,7 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
                     "meter_no": "METER-002",
                     "module_asset_no": "MODULE-002",
                     "module_source": "施工回传",
+                    "ingested_at": "2026-09-02T09:30:00+00:00",
                     "occurrence_count": 1,
                     "is_duplicate": "是",
                     "duplicate_type": "同表多模块",
@@ -143,6 +153,7 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
             "模块关联表号数",
             "表号候选模块数",
             "施工状态",
+            "数据入库时间",
         ),
         (
             1,
@@ -157,6 +168,7 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
             1,
             1,
             "已施工",
+            "2026-09-02T08:30:00+00:00",
         ),
         (
             2,
@@ -171,6 +183,7 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
             1,
             2,
             "施工中",
+            "2026-09-02T09:30:00+00:00",
         ),
     ]
 
@@ -260,7 +273,7 @@ def test_json_meter_module_export_rows_are_complete_and_terminal_sorted(monkeypa
     ]
 
 
-def test_data_center_route_accepts_precise_dashboard_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_data_center_route_ignores_retired_barcode_validation_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = RecordingRepository()
     monkeypatch.setattr(group_routes, "state_repository", lambda: repo)
 
@@ -283,11 +296,51 @@ def test_data_center_route_accepts_precise_dashboard_filters(monkeypatch: pytest
     recorded = repo.queries[-1]
     assert getattr(recorded, "has_photos", False) is True
     assert getattr(recorded, "terminal_status", "") == "incomplete"
-    assert recorded.barcode_status == "verified"
-    assert recorded.barcode_eligibility == "eligible"
+    assert recorded.barcode_status == "all"
+    assert recorded.barcode_eligibility == "all"
     assert recorded.installer_source == "photo"
     assert str(getattr(recorded, "activity_date_from", "")) == "2026-07-20"
     assert str(getattr(recorded, "activity_date_to", "")) == "2026-07-20"
+
+
+def test_data_center_list_hides_retired_barcode_validation_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    class VisibilityRepository(RecordingRepository):
+        def list_data_center_rows(self, query):
+            self.queries.append(query)
+            return {
+                "total": 1,
+                "page": 1,
+                "page_size": 20,
+                "items": [
+                    {
+                        "kind": "group",
+                        "id": "g-1",
+                        "barcode_status": "mismatched",
+                        "barcode_progress": {"status": "mismatched"},
+                        "group_barcode_missing_fields": ["module"],
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(group_routes, "state_repository", VisibilityRepository)
+
+    response = client.get("/groups/data-center", headers=admin_headers())
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert "barcode_status" not in item
+    assert "barcode_progress" not in item
+    assert "group_barcode_missing_fields" not in item
+
+
+def test_data_center_does_not_register_retired_barcode_validation_routes() -> None:
+    for path in (
+        "/groups/data-center/groups/g-1/barcode-manual-confirm",
+        "/groups/data-center/groups/g-1/photos/p-1/barcode-rescan",
+        "/groups/data-center/groups/g-1/photos/p-1/region-scan",
+    ):
+        response = client.post(path, headers=admin_headers(), json={})
+        assert response.status_code == 404
 
 
 def _group(
@@ -988,6 +1041,76 @@ def test_data_center_group_row_prefers_construction_identifiers_and_falls_back_t
     assert source_only_row["module_asset_no"] == "M-011"
 
 
+def test_data_center_group_row_uses_construction_photo_module_when_group_identifiers_are_empty() -> None:
+    group = _group(
+        14,
+        photos=[{**_construction_photo(14, 1, category="module_meter"), "asset_no": "CM-PHOTO-014"}],
+    )
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = ""
+
+    row = data_center_service.group_row(group)
+
+    assert row["module_asset_no"] == "CM-PHOTO-014"
+    assert row["construction_module_asset_no"] == "CM-PHOTO-014"
+
+
+def test_data_center_group_row_uses_imported_photo_module_when_group_identifiers_are_empty() -> None:
+    group = _group(
+        15,
+        photos=[
+            {
+                "id": "import-photo-015",
+                "asset_no": "OM-PHOTO-015",
+                "source_file": "initial-import.xlsx",
+                "category": "module_meter",
+                "archive_status": "archived",
+                "is_active": True,
+            }
+        ],
+    )
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = ""
+
+    row = data_center_service.group_row(group)
+
+    assert row["module_asset_no"] == "OM-PHOTO-015"
+    assert row["construction_module_asset_no"] == ""
+
+
+def test_data_center_group_row_exposes_two_module_channels_and_opens_conflict_anomaly() -> None:
+    """Catches source disagreement being silently hidden behind the effective module number."""
+    group = _group(16)
+    group["module_asset_no"] = "IMPORTED-016"
+    group["construction_module_asset_no"] = "CONSTRUCTED-016"
+
+    row = data_center_service.group_row(group)
+
+    assert row["module_source_values"] == {
+        "initial_import": ["IMPORTED-016"],
+        "construction": ["CONSTRUCTED-016"],
+    }
+    assert row["module_asset_no"] == "CONSTRUCTED-016"
+    assert {
+        anomaly["code"] for anomaly in row["anomalies"]
+    } >= {"module_channel_conflict"}
+
+
+def test_data_center_group_row_allows_one_populated_module_channel_without_conflict() -> None:
+    """Catches a valid single-channel record being misclassified as a channel conflict."""
+    group = _group(17)
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = "CONSTRUCTED-017"
+
+    row = data_center_service.group_row(group)
+
+    assert row["module_source_values"] == {
+        "initial_import": [],
+        "construction": ["CONSTRUCTED-017"],
+    }
+    assert "module_channel_conflict" not in {anomaly["code"] for anomaly in row["anomalies"]}
+
+
 def test_data_center_anomalies_accept_construction_identifiers_when_source_is_empty() -> None:
     group = _group(12)
     group["collector"] = ""
@@ -1081,6 +1204,8 @@ def test_postgres_data_center_sql_uses_active_photo_archive_and_required_slots(
     )
     assert "photos.archive_status" in compiled
     assert "photos.category" in compiled
+    assert "initial_import_module" in compiled
+    assert "construction_photo_module" in compiled
     assert "photo_count >= 4" not in compiled
     assert "raw_data ->> 'archive_status'" not in compiled
     assert "nulls last" in compiled
@@ -1492,7 +1617,7 @@ def test_postgres_data_center_detail_derives_statuses_after_loading_photos(
         "actor": "admin-a",
         "confirmed_at": "2026-08-27T12:00:00+08:00",
     }
-    assert detail["archive_status"] == "pending"
+    assert detail["archive_status"] == "unarchived"
     assert len(detail["photos"]) == 4
 
 
@@ -1553,7 +1678,7 @@ def test_postgres_data_center_detail_excludes_invalid_upload_photos(
     assert detail["photo_count"] == 4
     assert [photo["id"] for photo in detail["photos"]] == ["p1", "p2", "p3", "p4"]
     assert detail["classification_status"] == "complete"
-    assert detail["archive_status"] == "archived"
+    assert detail["archive_status"] == "unarchived"
     compiled = str(session.photo_statements[0].compile(compile_kwargs={"literal_binds": True})).lower()
     assert "photos.upload_status != 'invalid'" in compiled
 

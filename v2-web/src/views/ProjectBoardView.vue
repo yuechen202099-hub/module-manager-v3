@@ -24,7 +24,6 @@ import type {
 } from '@/api/types'
 import InstallerKpiDialog from '@/components/InstallerKpiDialog.vue'
 import { useAuthStore } from '@/stores/auth'
-import { mapBarcodeDashboardState } from '@/utils/barcodeVerificationState.mjs'
 import {
   buildDataCenterDrilldown,
   type DataCenterDrilldownContext,
@@ -109,41 +108,11 @@ const installerWorkloadFetchConcurrency = 3
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
 const archiveRate = computed(() => (summary.value.groups ? summary.value.approvedGroups / summary.value.groups : 0))
-const barcodeDashboard = computed(() => mapBarcodeDashboardState(summary.value))
 
 const summaryCards = computed<Array<{ label: string; value: number; drilldown: DataCenterDrilldownKind }>>(() => [
   { label: '资料组', value: summary.value.groups, drilldown: 'groups' },
   { label: '已扫码组', value: summary.value.scannedGroups, drilldown: 'scanned_groups' },
   { label: '已归档', value: summary.value.approvedGroups, drilldown: 'archived_groups' },
-])
-
-const barcodeCompactCards = computed<
-  Array<{ label: string; value: string | number; tone: 'primary' | 'success' | 'warning' | 'muted'; drilldown: DataCenterDrilldownKind }>
->(() => [
-  {
-    label: '条码准确率',
-    value: barcodeDashboard.value.rateLabel,
-    tone: 'primary',
-    drilldown: 'barcode_eligible',
-  },
-  {
-    label: '核验通过',
-    value: barcodeDashboard.value.passed,
-    tone: 'success',
-    drilldown: 'barcode_passed',
-  },
-  {
-    label: '待人工',
-    value: barcodeDashboard.value.failed + barcodeDashboard.value.unreadable,
-    tone: 'warning',
-    drilldown: 'barcode_manual_queue',
-  },
-  {
-    label: '不符合条件',
-    value: barcodeDashboard.value.notEligible,
-    tone: 'muted',
-    drilldown: 'barcode_ineligible',
-  },
 ])
 
 const progressRows = computed<Array<{ label: string; percentage: number; valueLabel: string; drilldown: DataCenterDrilldownKind }>>(() => [
@@ -695,25 +664,6 @@ onUnmounted(() => {
       </template>
     </div>
 
-    <div class="barcode-compact-cards">
-      <template v-for="item in barcodeCompactCards" :key="item.label">
-        <button
-          v-if="isAdmin"
-          class="barcode-compact-card barcode-card-button"
-          :class="`tone-${item.tone}`"
-          type="button"
-          @click="openDashboardDrilldown(item.drilldown)"
-        >
-          <span>{{ item.label }}</span>
-          <strong>{{ item.value }}</strong>
-        </button>
-        <article v-else class="barcode-compact-card" :class="`tone-${item.tone}`">
-          <span>{{ item.label }}</span>
-          <strong>{{ item.value }}</strong>
-        </article>
-      </template>
-    </div>
-
     <div class="board-grid">
       <section class="panel board-progress">
         <h3>项目进度</h3>
@@ -875,7 +825,6 @@ onUnmounted(() => {
 
 .metric-button,
 .board-progress-row-button,
-.barcode-card-button,
 .risk-card-button,
 .installer-row-button,
 .flow-node-button {
@@ -886,7 +835,6 @@ onUnmounted(() => {
 
 .metric-button,
 .board-progress-row-button,
-.barcode-card-button,
 .risk-card-button,
 .installer-row-button,
 .flow-node-button {
@@ -907,7 +855,6 @@ onUnmounted(() => {
 
 .metric-button:hover,
 .board-progress-row-button:hover,
-.barcode-card-button:hover,
 .risk-card-button:hover,
 .installer-row-button:hover,
 .flow-node-button:hover {
@@ -918,7 +865,6 @@ onUnmounted(() => {
 
 .metric-button:focus-visible,
 .board-progress-row-button:focus-visible,
-.barcode-card-button:focus-visible,
 .risk-card-button:focus-visible,
 .installer-row-button:focus-visible,
 .flow-node-button:focus-visible {
@@ -929,53 +875,6 @@ onUnmounted(() => {
 .board-progress-rows {
   display: grid;
   gap: 12px;
-}
-
-.barcode-compact-cards {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(128px, 1fr));
-  gap: 10px;
-}
-
-.barcode-compact-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 58px;
-  padding: 10px 14px;
-  border: 1px solid var(--v2-border-soft, #dde5ee);
-  border-radius: 8px;
-  background: var(--v2-surface, #fff);
-}
-
-.barcode-compact-card span {
-  color: var(--v2-text-muted, #64748b);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.barcode-compact-card strong {
-  color: var(--v2-text-strong, #0f172a);
-  font-size: 20px;
-}
-
-.barcode-compact-card.tone-primary {
-  border-color: rgba(10, 114, 216, 0.22);
-  background: #eff6ff;
-}
-
-.barcode-compact-card.tone-success {
-  border-color: rgba(22, 163, 74, 0.18);
-  background: #f0fdf4;
-}
-
-.barcode-compact-card.tone-warning {
-  border-color: rgba(234, 88, 12, 0.18);
-  background: #fff7ed;
-}
-
-.barcode-compact-card.tone-muted {
-  background: #f8fafc;
 }
 
 .native-board-page .risk-grid {
@@ -1034,9 +933,6 @@ onUnmounted(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .barcode-compact-cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 720px) {

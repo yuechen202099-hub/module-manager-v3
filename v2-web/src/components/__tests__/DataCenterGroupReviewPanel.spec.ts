@@ -31,6 +31,7 @@ function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 
     address: `address-${id}`,
     collector: `collector-${id}`,
     moduleAssetNo: `module-${id}`,
+    moduleSourceValues: { initialImport: [], construction: [] },
     constructionCollector: '',
     constructionModuleAssetNo: '',
     installer: 'installer',
@@ -40,11 +41,10 @@ function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 
     classificationManualConfirmation: null,
     classificationConfirmationFingerprint: `fingerprint-${id}`,
     anomalies: [],
-    barcodeStatus: 'passed',
-    barcodeProgress: {},
-    groupBarcodeMissingFields: [],
     constructionStatus: 'constructed',
     archiveStatus: 'unarchived',
+    archiveReady: false,
+    archiveBlockers: [],
     exceptionStatus: '',
     reviewStatus,
     updatedAt: '2026-08-26T00:00:00Z',
@@ -63,18 +63,16 @@ function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 
 const apiMock = vi.hoisted(() => ({
   classifyDataCenterGroupPhoto: vi.fn(),
   confirmDataCenterGroupClassification: vi.fn(),
-  confirmDataCenterGroupBarcode: vi.fn(),
   deleteDataCenterGroupPhoto: vi.fn(),
   fetchDataCenterDetail: vi.fn(),
   fetchGroupPhotoObjectUrl: vi.fn(),
   getApiErrorStatus: vi.fn((error: unknown) => (error as { status?: number } | null)?.status),
-  rescanDataCenterGroupPhotoBarcode: vi.fn(),
+  manualArchiveDataCenterGroup: vi.fn(),
   resetAdminGroupToUnconstructed: vi.fn(),
   resetAdminGroupToUnreviewed: vi.fn(),
   resolveDataCenterGroupAnomaly: vi.fn(),
   returnDataCenterGroupToException: vi.fn(),
   reviewDataCenterGroup: vi.fn(),
-  scanDataCenterGroupPhotoRegion: vi.fn(),
   updateDataCenterGroup: vi.fn(),
   uploadGroupImages: vi.fn(),
 }))
@@ -113,17 +111,15 @@ describe('DataCenterGroupReviewPanel', () => {
     })
     apiMock.fetchDataCenterDetail.mockResolvedValue(detailFixture('default'))
     apiMock.fetchGroupPhotoObjectUrl.mockResolvedValue('blob:default')
+    apiMock.manualArchiveDataCenterGroup.mockResolvedValue({})
     apiMock.classifyDataCenterGroupPhoto.mockResolvedValue({})
     apiMock.confirmDataCenterGroupClassification.mockResolvedValue({})
-    apiMock.confirmDataCenterGroupBarcode.mockResolvedValue({})
     apiMock.deleteDataCenterGroupPhoto.mockResolvedValue({})
-    apiMock.rescanDataCenterGroupPhotoBarcode.mockResolvedValue({})
     apiMock.resetAdminGroupToUnconstructed.mockResolvedValue({})
     apiMock.resetAdminGroupToUnreviewed.mockResolvedValue({})
     apiMock.resolveDataCenterGroupAnomaly.mockResolvedValue({})
     apiMock.returnDataCenterGroupToException.mockResolvedValue({})
     apiMock.reviewDataCenterGroup.mockResolvedValue({} as MaterialGroup)
-    apiMock.scanDataCenterGroupPhotoRegion.mockResolvedValue({})
     apiMock.updateDataCenterGroup.mockResolvedValue({ changedFields: [] })
     apiMock.uploadGroupImages.mockResolvedValue({ group: undefined, uploadedUrls: [] })
   })
@@ -151,11 +147,57 @@ describe('DataCenterGroupReviewPanel', () => {
       module_asset_no: 'module-corrected',
       collector: 'collector-corrected',
     }, '现场号码核对')
-    expect(apiMock.confirmDataCenterGroupBarcode).not.toHaveBeenCalled()
-    expect(apiMock.rescanDataCenterGroupPhotoBarcode).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('重新扫码')
     expect(wrapper.text()).not.toContain('人工确认')
     expect(wrapper.text()).not.toContain('字段修正')
+    wrapper.unmount()
+  })
+
+  it('archives an eligible terminal only after the administrator confirms the manual archive action', async () => {
+    const detail = detailFixture('g-manual-archive')
+    Object.assign(detail as unknown as Record<string, unknown>, {
+      archiveReady: true,
+      archiveBlockers: [],
+    })
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+
+    await buttonByText(wrapper, '手动归档').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.manualArchiveDataCenterGroup).toHaveBeenCalledWith(detail.id)
+    wrapper.unmount()
+  })
+
+  it('shows both module business channels before saving one unified module correction', async () => {
+    const detail = detailFixture('g-module-channels')
+    Object.assign(detail as unknown as Record<string, unknown>, {
+      moduleSourceValues: {
+        initialImport: ['IMPORTED-018'],
+        construction: ['CONSTRUCTED-018'],
+      },
+    })
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+
+    const sources = wrapper.get('[data-testid="module-source-values"]')
+    expect(sources.text()).toContain('初始导入')
+    expect(sources.text()).toContain('IMPORTED-018')
+    expect(sources.text()).toContain('现场施工回传')
+    expect(sources.text()).toContain('CONSTRUCTED-018')
+
+    await wrapper.get('[data-testid="module-no-input"]').setValue('CONFIRMED-018')
+    await buttonByText(wrapper, '保存').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.updateDataCenterGroup).toHaveBeenCalledWith(detail.id, expect.objectContaining({
+      module_asset_no: 'CONFIRMED-018',
+    }), '审阅保存')
     wrapper.unmount()
   })
 
@@ -939,7 +981,6 @@ describe('DataCenterGroupReviewPanel', () => {
     const classificationDetail = {
       ...detailFixture('g-manual-classification'),
       classificationStatus: 'incomplete',
-      barcodeStatus: 'unreadable',
       photos: [
         { id: 'photo-unclassified', url: '', name: 'photo-unclassified', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
         { id: 'photo-module', url: '', name: 'photo-module', status: 'valid', category: 'module_meter', categoryLabel: '模块与电能表' },
@@ -959,7 +1000,7 @@ describe('DataCenterGroupReviewPanel', () => {
 
     expect(confirmDialog).toHaveBeenCalledTimes(1)
     expect(String(confirmDialog.mock.calls[0]?.[0])).toContain('仍有 1 张照片未分类')
-    expect(String(confirmDialog.mock.calls[0]?.[0])).toContain('条码状态未通过')
+    expect(String(confirmDialog.mock.calls[0]?.[0])).not.toContain('条码状态未通过')
     expect(apiMock.confirmDataCenterGroupClassification).toHaveBeenCalledWith(
       'g-manual-classification',
       true,

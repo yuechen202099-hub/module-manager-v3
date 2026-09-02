@@ -10,8 +10,6 @@ const dataCenterMock = vi.hoisted(() => ({
     constructionStatus: 'all',
     terminalStatus: 'all',
     archiveStatus: 'all',
-    barcodeStatus: 'all',
-    barcodeEligibility: 'all',
     classificationStatus: 'all',
     exceptionStatus: '',
     installer: '',
@@ -43,9 +41,6 @@ const dataCenterMock = vi.hoisted(() => ({
     photoCount: 2,
     classificationStatus: 'complete',
     classificationProgress: {},
-    barcodeStatus: 'passed',
-    barcodeProgress: {},
-    groupBarcodeMissingFields: [],
     constructionStatus: 'completed',
     archiveStatus: 'unarchived',
     exceptionStatus: '',
@@ -104,5 +99,6 @@ describe('GlobalSearchView', () => {
     expect(labels.filter((label) => label === '模块')).toHaveLength(1)
     expect(labels).not.toContain('施工采集器')
     expect(labels).not.toContain('施工模块')
+    expect(labels).not.toContain('扫码')
   })
 })

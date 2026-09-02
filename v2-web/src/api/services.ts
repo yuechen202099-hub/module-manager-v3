@@ -22,8 +22,6 @@ import type {
   CollectorWorkbenchItemStatus,
   CollectorWorkbenchSummary,
   CurrentUser,
-  DataCenterBarcodeFilterStatus,
-  DataCenterBarcodeEligibility,
   DataCenterDataType,
   DataCenterInstallerSource,
   DataCenterDetail,
@@ -110,6 +108,10 @@ type BackendDataCenterRow = {
   address?: string
   collector?: string
   module_asset_no?: string
+  module_source_values?: {
+    initial_import?: unknown[]
+    construction?: unknown[]
+  }
   construction_collector?: string
   construction_module_asset_no?: string
   installer?: string
@@ -131,6 +133,8 @@ type BackendDataCenterRow = {
   group_barcode_missing_fields?: string[]
   construction_status?: string
   archive_status?: string
+  archive_ready?: boolean
+  archive_blockers?: unknown[]
   exception_status?: string
   status?: string
   updated_at?: string
@@ -1038,17 +1042,20 @@ function mapDataCenterRow(raw: BackendDataCenterRow): DataCenterRow {
     address: raw.address || '',
     collector: constructionCollector || (raw.collector || '').trim(),
     moduleAssetNo: constructionModuleAssetNo || (raw.module_asset_no || '').trim(),
+    moduleSourceValues: {
+      initialImport: mapStringArray(raw.module_source_values?.initial_import),
+      construction: mapStringArray(raw.module_source_values?.construction),
+    },
     constructionCollector,
     constructionModuleAssetNo,
     installer: raw.installer || '',
     photoCount: Number(raw.photo_count || raw.photos?.length || 0),
     classificationStatus: raw.classification_status || 'incomplete',
     classificationProgress: raw.classification_progress || {},
-    barcodeStatus: raw.barcode_status || 'ineligible',
-    barcodeProgress: raw.barcode_progress || {},
-    groupBarcodeMissingFields: mapStringArray(raw.group_barcode_missing_fields),
     constructionStatus: raw.construction_status || 'unconstructed',
     archiveStatus: raw.archive_status || 'unarchived',
+    archiveReady: Boolean(raw.archive_ready),
+    archiveBlockers: mapStringArray(raw.archive_blockers),
     exceptionStatus: raw.exception_status || '',
     reviewStatus: raw.status || 'pending',
     updatedAt: raw.updated_at || '',
@@ -1634,8 +1641,6 @@ export type DataCenterListQuery = {
   constructionStatus?: string
   terminalStatus?: DataCenterTerminalFilterStatus
   archiveStatus?: string
-  barcodeStatus?: DataCenterBarcodeFilterStatus
-  barcodeEligibility?: DataCenterBarcodeEligibility
   classificationStatus?: string
   exceptionStatus?: string
   installer?: string
@@ -1659,8 +1664,6 @@ export async function fetchDataCenterRows(query: DataCenterListQuery): Promise<D
     construction_status: query.constructionStatus || 'all',
     terminal_status: query.terminalStatus || 'all',
     archive_status: query.archiveStatus || 'all',
-    barcode_status: query.barcodeStatus || 'all',
-    barcode_eligibility: query.barcodeEligibility || 'all',
     classification_status: query.classificationStatus || 'all',
     exception_status: query.exceptionStatus || '',
     installer: query.installer || '',
@@ -1713,6 +1716,17 @@ export async function resolveDataCenterGroupAnomaly(
         expected_evidence_fingerprint: expectedEvidenceFingerprint,
         source_page: 'review_rephoto_workbench',
       }),
+    },
+  )
+  return mapDataCenterDetail(data)
+}
+
+export async function manualArchiveDataCenterGroup(groupId: string): Promise<DataCenterDetail> {
+  const data = await api<BackendDataCenterRow>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/archive`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ source_page: 'review_rephoto_workbench' }),
     },
   )
   return mapDataCenterDetail(data)
@@ -1777,12 +1791,11 @@ export async function updateDataCenterGroup(
   groupId: string,
   patch: Record<string, unknown>,
   reason = '',
-): Promise<{ group?: MaterialGroup; changedFields: string[]; archiveStatus: string; barcodeStatus: string }> {
+): Promise<{ group?: MaterialGroup; changedFields: string[]; archiveStatus: string }> {
   const data = await api<{
     group?: BackendGroup
     changed_fields?: string[]
     archive_status?: string
-    barcode_status?: string
   }>(`/groups/data-center/groups/${encodeURIComponent(groupId)}`, {
     method: 'PATCH',
     body: JSON.stringify({ patch, reason, source_page: 'data_center' }),
@@ -1791,35 +1804,6 @@ export async function updateDataCenterGroup(
     group: data.group ? mapGroup(data.group) : undefined,
     changedFields: (data.changed_fields || []).map(String),
     archiveStatus: data.archive_status || '',
-    barcodeStatus: data.barcode_status || '',
-  }
-}
-
-export async function confirmDataCenterGroupBarcode(
-  groupId: string,
-  payload: GroupBarcodeManualConfirmation,
-): Promise<{ group?: MaterialGroup; archiveStatus: string; barcodeStatus: string; deliveryPackageJobStatus: string }> {
-  const data = await api<{
-    group?: BackendGroup
-    archive_status?: string
-    barcode_status?: string
-    delivery_package_job_status?: string
-  }>(`/groups/data-center/groups/${encodeURIComponent(groupId)}/barcode-manual-confirm`, {
-    method: 'POST',
-    body: JSON.stringify({
-      meter_no: payload.meterNo,
-      module_asset_no: payload.moduleAssetNo,
-      collector: payload.collector,
-      reason: payload.reason,
-      photo_ids: payload.photoIds,
-      source_page: 'data_center',
-    }),
-  })
-  return {
-    group: data.group ? mapGroup(data.group) : undefined,
-    archiveStatus: data.archive_status || '',
-    barcodeStatus: data.barcode_status || '',
-    deliveryPackageJobStatus: data.delivery_package_job_status || '',
   }
 }
 
@@ -1828,12 +1812,10 @@ export async function classifyDataCenterGroupPhoto(
   photoId: string,
   category: string,
   reason = '数据中台照片分类',
-): Promise<{ group?: MaterialGroup; archiveStatus: string; barcodeStatus: string; deliveryPackageJobStatus: string }> {
+): Promise<{ group?: MaterialGroup; archiveStatus: string }> {
   const data = await api<{
     group?: BackendGroup
     archive_status?: string
-    barcode_status?: string
-    delivery_package_job_status?: string
   }>(
     `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/classify`,
     {
@@ -1844,8 +1826,6 @@ export async function classifyDataCenterGroupPhoto(
   return {
     group: data.group ? mapGroup(data.group) : undefined,
     archiveStatus: data.archive_status || '',
-    barcodeStatus: data.barcode_status || '',
-    deliveryPackageJobStatus: data.delivery_package_job_status || '',
   }
 }
 
@@ -1858,38 +1838,6 @@ export async function deleteDataCenterGroupPhoto(
     { method: 'DELETE' },
   )
   return { group: data.group ? mapGroup(data.group) : undefined }
-}
-
-export async function rescanDataCenterGroupPhotoBarcode(
-  groupId: string,
-  photoId: string,
-  category = '',
-  reason = '数据中台重新扫码',
-): Promise<{ photo: ReviewPhoto }> {
-  const data = await api<BackendPhoto>(
-    `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/barcode-rescan`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ category, reason, source_page: 'data_center' }),
-    },
-  )
-  return { photo: mapPhoto(data) }
-}
-
-export async function scanDataCenterGroupPhotoRegion(
-  groupId: string,
-  photoId: string,
-  request: RegionScanRequest,
-  reason = '数据中台框选扫码',
-): Promise<RegionScanResult> {
-  const data = await api<BackendRegionScanResult>(
-    `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/region-scan`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ ...regionScanRequestBody(request), reason, source_page: 'data_center' }),
-    },
-  )
-  return mapRegionScanResult(data)
 }
 
 export async function finalizeDataCenterUnmatchedToGroup(

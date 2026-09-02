@@ -30,7 +30,7 @@ def _explode_retired_delivery_path(*_args, **_kwargs):
     raise AssertionError("retired delivery path was called")
 
 
-def test_delivery_worker_claims_only_verification_and_auto_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delivery_worker_does_not_claim_disabled_barcode_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import barcode_maintenance_worker as worker
 
     calls: list[str] = []
@@ -38,18 +38,18 @@ def test_delivery_worker_claims_only_verification_and_auto_archive(monkeypatch: 
     monkeypatch.setattr(
         worker,
         "claim_next_verification_job",
-        lambda **_kwargs: calls.append("verification"),
+        lambda **_kwargs: pytest.fail("background worker must not run barcode verification"),
     )
     monkeypatch.setattr(
         worker,
         "claim_next_archive_job",
-        lambda **_kwargs: calls.append("auto_archive"),
+        lambda **_kwargs: pytest.fail("background worker must not auto-archive terminals"),
     )
     monkeypatch.setattr(worker, "claim_next_delivery_cache_job", _explode_retired_delivery_path)
     monkeypatch.setattr(worker, "claim_next_delivery_package_job", _explode_retired_delivery_path)
 
     assert worker._claim_next_work("worker-1") is None
-    assert set(calls) == {"verification", "auto_archive"}
+    assert calls == []
 
 
 def test_worker_batch_never_runs_delivery_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -663,18 +663,11 @@ def test_json_archive_failure_retries_then_requires_manual_review(
     assert worker.claim_next_archive_job(worker_id="archive-worker-final", now=now) is None
 
 
-def test_worker_claim_rotation_includes_durable_archive_work(
+def test_worker_does_not_claim_retired_barcode_or_auto_archive_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import barcode_maintenance_worker as worker
 
-    archive_job = worker.MaintenanceJob(
-        kind="auto_archive",
-        team_id="team-a",
-        group_id="group-a",
-        lease_owner="worker-a",
-        lease_token="lease-a",
-    )
     calls: list[str] = []
     monkeypatch.setattr(worker, "_next_claim_kind", "verification")
     monkeypatch.setattr(
@@ -685,7 +678,7 @@ def test_worker_claim_rotation_includes_durable_archive_work(
     monkeypatch.setattr(
         worker,
         "claim_next_archive_job",
-        lambda *, worker_id: calls.append(f"auto_archive:{worker_id}") or archive_job,
+        lambda *, worker_id: calls.append(f"auto_archive:{worker_id}"),
     )
     monkeypatch.setattr(
         worker,
@@ -693,8 +686,8 @@ def test_worker_claim_rotation_includes_durable_archive_work(
         lambda *, worker_id: calls.append(f"delivery_cache:{worker_id}"),
     )
 
-    assert worker._claim_next_work("worker-a") == archive_job
-    assert calls == ["verification:worker-a", "auto_archive:worker-a"]
+    assert worker._claim_next_work("worker-a") is None
+    assert calls == []
 
 
 def test_worker_processes_archive_only_through_the_claimed_lease(

@@ -1314,20 +1314,11 @@ def claim_next_delivery_cache_job(*, worker_id: str, now: datetime | None = None
 
 
 def _claim_next_work(worker_id: str) -> MaintenanceJob | None:
-    global _next_claim_kind
-    claim_order = ("verification", "auto_archive")
-    with _claim_kind_lock:
-        first = _next_claim_kind
-        first_index = claim_order.index(first) if first in claim_order else 0
-        _next_claim_kind = claim_order[(first_index + 1) % len(claim_order)]
-    claimers = {
-        "verification": lambda: claim_next_verification_job(worker_id=worker_id),
-        "auto_archive": lambda: claim_next_archive_job(worker_id=worker_id),
-    }
-    for kind in claim_order[first_index:] + claim_order[:first_index]:
-        job = claimers[kind]()
-        if job is not None:
-            return job
+    """Barcode verification and automatic archive jobs are deliberately retired.
+
+    Construction and inventory scanners still record numbers at the edge, but the
+    server must not create, claim, or infer a barcode-correctness result.
+    """
     return None
 
 

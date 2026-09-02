@@ -13,7 +13,7 @@ class DataCenterQuery(BaseModel):
     data_type: Literal["all", "group", "unmatched"] = "all"
     construction_status: Literal["all", "unconstructed", "in_progress", "completed"] = "all"
     terminal_status: Literal["all", "completed", "incomplete", "pending_archive", "archived"] = "all"
-    archive_status: Literal["all", "unarchived", "pending", "archived"] = "all"
+    archive_status: Literal["all", "unarchived", "archived"] = "all"
     barcode_status: Literal[
         "all",
         "passed",
@@ -65,11 +65,10 @@ class DataCenterRow(BaseModel):
     photo_count: int = 0
     classification_status: str = "incomplete"
     classification_progress: dict[str, Any] = Field(default_factory=dict)
-    barcode_status: str = "ineligible"
-    barcode_progress: dict[str, Any] = Field(default_factory=dict)
-    group_barcode_missing_fields: list[str] = Field(default_factory=list)
     construction_status: str = "unconstructed"
     archive_status: str = "unarchived"
+    archive_ready: bool = False
+    archive_blockers: list[str] = Field(default_factory=list)
     exception_status: str = ""
     updated_at: datetime | str | None = None
 

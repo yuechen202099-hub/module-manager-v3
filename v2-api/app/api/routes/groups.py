@@ -60,6 +60,10 @@ class DataCenterManualClassificationConfirmRequest(BaseModel):
     source_page: str = "review_rephoto_workbench"
 
 
+class DataCenterManualArchiveRequest(BaseModel):
+    source_page: str = "review_rephoto_workbench"
+
+
 class DataCenterAnomalyResolveRequest(BaseModel):
     expected_evidence_fingerprint: str = Field(min_length=64, max_length=64)
     source_page: str = "review_rephoto_workbench"
@@ -68,28 +72,6 @@ class DataCenterAnomalyResolveRequest(BaseModel):
 class DataCenterPhotoClassifyRequest(BaseModel):
     category: str = ""
     reason: str = ""
-    source_page: str = "data_center"
-
-
-class DataCenterPhotoBarcodeRescanRequest(BaseModel):
-    category: str = ""
-    reason: str = ""
-    source_page: str = "data_center"
-
-
-class DataCenterPhotoRegionScanRequest(BaseModel):
-    barcode_type: Literal["meter", "collector", "module"]
-    region: dict[str, Any] = Field(default_factory=dict)
-    reason: str = ""
-    source_page: str = "data_center"
-
-
-class DataCenterManualConfirmRequest(BaseModel):
-    meter_no: str = ""
-    module_asset_no: str = ""
-    collector: str = ""
-    reason: str = ""
-    photo_ids: list[str] = Field(default_factory=list)
     source_page: str = "data_center"
 
 
@@ -113,6 +95,28 @@ def state_repository():
         return get_state_repository()
     except StateBackendNotReady as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+_RETIRED_DATA_CENTER_BARCODE_FIELDS = frozenset(
+    {
+        "barcode_status",
+        "barcode_progress",
+        "group_barcode_missing_fields",
+    }
+)
+
+
+def hide_retired_data_center_barcode_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep historical scan evidence private after retiring data-center validation."""
+    def strip(row: Any) -> Any:
+        if not isinstance(row, dict):
+            return row
+        return {key: value for key, value in row.items() if key not in _RETIRED_DATA_CENTER_BARCODE_FIELDS}
+
+    result = strip(payload)
+    if isinstance(result, dict) and isinstance(result.get("items"), list):
+        result["items"] = [strip(item) for item in result["items"]]
+    return result
 
 
 @router.get("/search")
@@ -172,21 +176,8 @@ def data_center_query(
     data_type: Literal["all", "group", "unmatched"] = "all",
     construction_status: Literal["all", "unconstructed", "in_progress", "completed"] = "all",
     terminal_status: Literal["all", "completed", "incomplete", "pending_archive", "archived"] = "all",
-    archive_status: Literal["all", "unarchived", "pending", "archived"] = "all",
-    barcode_status: Literal[
-        "all",
-        "passed",
-        "manual",
-        "manual_confirmed",
-        "mismatched",
-        "failed",
-        "unreadable",
-        "ineligible",
-        "verified",
-        "needs_review",
-    ] = "all",
+    archive_status: Literal["all", "unarchived", "archived"] = "all",
     classification_status: Literal["all", "complete", "incomplete"] = "all",
-    barcode_eligibility: Literal["all", "eligible", "ineligible"] = "all",
     exception_status: str = "",
     installer: str = "",
     installer_source: Literal["all", "photo"] = "all",
@@ -207,9 +198,7 @@ def data_center_query(
             construction_status=construction_status,
             terminal_status=terminal_status,
             archive_status=archive_status,
-            barcode_status=barcode_status,
             classification_status=classification_status,
-            barcode_eligibility=barcode_eligibility,
             exception_status=exception_status,
             installer=installer,
             installer_source=installer_source,
@@ -247,7 +236,7 @@ def list_data_center(
         result = state_repository().list_data_center_rows(query)
     finally:
         local_simulation.reset_current_team(token)
-    return ok(request, result)
+    return ok(request, hide_retired_data_center_barcode_fields(result))
 
 
 @router.get("/data-center/export-meter-module")
@@ -286,7 +275,7 @@ def data_center_detail(
         local_simulation.reset_current_team(token)
     if result is None:
         raise HTTPException(status_code=404, detail="Data center item not found")
-    return ok(request, result)
+    return ok(request, hide_retired_data_center_barcode_fields(result))
 
 
 @router.post("/data-center/groups/{group_id}/anomalies/{anomaly_code}/resolve")
@@ -372,6 +361,30 @@ def decide_data_center_group_review(
     return ok(request, resolve_group_collection_for_response(result))
 
 
+@router.post("/data-center/groups/{group_id}/archive")
+def manual_archive_data_center_group(
+    group_id: str,
+    payload: DataCenterManualArchiveRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().manual_archive_data_center_group(
+            group_id,
+            actor=_admin_actor(admin_payload),
+            source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
 @router.post("/data-center/groups/{group_id}/classification-manual-confirm")
 def manual_confirm_data_center_group_classification(
     group_id: str,
@@ -446,92 +459,6 @@ def delete_data_center_group_photo(
         invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Photo or group not found") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        local_simulation.reset_current_team(token)
-    return ok(request, resolve_group_collection_for_response(result))
-
-
-@router.post("/data-center/groups/{group_id}/photos/{photo_id}/barcode-rescan")
-def rescan_data_center_group_photo_barcode(
-    group_id: str,
-    photo_id: str,
-    payload: DataCenterPhotoBarcodeRescanRequest,
-    request: Request,
-    admin_payload: dict = Depends(require_admin),
-):
-    token = _with_admin_team(admin_payload)
-    try:
-        result = state_repository().rescan_data_center_group_photo_barcode(
-            group_id,
-            photo_id,
-            actor=_admin_actor(admin_payload),
-            category=payload.category,
-            reason=payload.reason,
-            source_page=payload.source_page,
-        )
-        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        local_simulation.reset_current_team(token)
-    return ok(request, resolve_group_collection_for_response(result))
-
-
-@router.post("/data-center/groups/{group_id}/photos/{photo_id}/region-scan")
-def scan_data_center_group_photo_region(
-    group_id: str,
-    photo_id: str,
-    payload: DataCenterPhotoRegionScanRequest,
-    request: Request,
-    admin_payload: dict = Depends(require_admin),
-):
-    token = _with_admin_team(admin_payload)
-    try:
-        result = state_repository().scan_data_center_group_photo_region(
-            group_id,
-            photo_id,
-            barcode_type=payload.barcode_type,
-            region=payload.region,
-            actor=_admin_actor(admin_payload),
-            reason=payload.reason,
-            source_page=payload.source_page,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
-    except ValueError as exc:
-        detail = "Image recognition unavailable" if "unavailable" in str(exc).lower() else str(exc)
-        raise HTTPException(status_code=422, detail=detail) from exc
-    finally:
-        local_simulation.reset_current_team(token)
-    return ok(request, result)
-
-
-@router.post("/data-center/groups/{group_id}/barcode-manual-confirm")
-def manual_confirm_data_center_group_barcode(
-    group_id: str,
-    payload: DataCenterManualConfirmRequest,
-    request: Request,
-    admin_payload: dict = Depends(require_admin),
-):
-    token = _with_admin_team(admin_payload)
-    try:
-        result = state_repository().manual_confirm_group_barcode(
-            group_id,
-            actor=_admin_actor(admin_payload),
-            reason=payload.reason,
-            source_page=payload.source_page,
-            meter_no=payload.meter_no,
-            module_asset_no=payload.module_asset_no,
-            collector=payload.collector,
-            photo_ids=payload.photo_ids,
-        )
-        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:

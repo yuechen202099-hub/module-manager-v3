@@ -12,6 +12,15 @@ from app.services.barcode_verification_contract import has_current_eligible_phot
 
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
 MANUAL_CLASSIFICATION_BARCODE_READY = {"passed", "manual", "manual_confirmed", "manual_passed"}
+ARCHIVE_REQUIRED_PHOTO_SLOTS = ("module_meter", "after_box")
+MODULE_ARCHIVE_ANOMALY_CODES = frozenset(
+    {
+        "module_missing",
+        "module_meter_photo_conflict",
+        "module_channel_conflict",
+        "exception_module_error",
+    }
+)
 DASHBOARD_IGNORED_EXCEPTION_REASON = "missing_collector_photo"
 DASHBOARD_IGNORED_EXCEPTION_REASONS = frozenset(
     {
@@ -44,6 +53,7 @@ ANOMALY_MESSAGES = {
     "module_barcode_mismatch": "模块号与台账不一致",
     "collector_barcode_mismatch": "采集器号与照片识别结果不一致",
     "required_photos_missing": "缺少必要施工照片",
+    "module_channel_conflict": "初始导入与现场施工回传的模块号不一致",
 }
 
 EXCEPTION_REASON_ANOMALIES = {
@@ -75,11 +85,63 @@ def effective_collector(group: Mapping[str, Any]) -> str:
     return str(group.get("collector") or "").strip()
 
 
-def effective_module_asset_no(group: Mapping[str, Any]) -> str:
-    construction_value = str(group.get("construction_module_asset_no") or "").strip()
-    if construction_value:
-        return construction_value
-    return str(group.get("module_asset_no") or group.get("asset_no") or "").strip()
+def _photo_module_asset_no(photo: Mapping[str, Any]) -> str:
+    raw = photo.get("raw_data") if isinstance(photo.get("raw_data"), Mapping) else {}
+    return str(
+        photo.get("module_asset_no")
+        or photo.get("asset_no")
+        or raw.get("module_asset_no")
+        or raw.get("asset_no")
+        or ""
+    ).strip()
+
+
+def _photo_is_construction_source(photo: Mapping[str, Any]) -> bool:
+    raw = photo.get("raw_data") if isinstance(photo.get("raw_data"), Mapping) else {}
+    source_text = " ".join(
+        str(photo.get(key) or raw.get(key) or "")
+        for key in ("source", "upload_source", "storage_source", "source_file")
+    ).lower()
+    return "construction" in source_text
+
+
+def module_source_values(
+    group: Mapping[str, Any],
+    photos: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Return the two allowed business-channel module values in stable display order."""
+    source_values: dict[str, list[str]] = {"initial_import": [], "construction": []}
+
+    def add(channel: str, value: Any) -> None:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in source_values[channel]:
+            source_values[channel].append(normalized)
+
+    persisted_values = group.get("module_source_values")
+    if isinstance(persisted_values, Mapping):
+        for channel in source_values:
+            values = persisted_values.get(channel) or []
+            if isinstance(values, (str, bytes)):
+                values = [values]
+            if isinstance(values, Iterable):
+                for value in values:
+                    add(channel, value)
+    add("initial_import", group.get("module_asset_no") or group.get("asset_no"))
+    add("construction", group.get("construction_module_asset_no"))
+    candidates = photos if photos is not None else active_photos(group)
+    for photo in candidates:
+        if photo.get("is_active", True) is False:
+            continue
+        add("construction" if _photo_is_construction_source(photo) else "initial_import", _photo_module_asset_no(photo))
+    return source_values
+
+
+def effective_module_asset_no(
+    group: Mapping[str, Any],
+    photos: Iterable[Mapping[str, Any]] | None = None,
+) -> str:
+    values = module_source_values(group, photos)
+    return (values["construction"] or values["initial_import"] or [""])[0]
 
 
 def manual_classification_snapshot(
@@ -105,18 +167,10 @@ def manual_classification_snapshot(
             anomalies.append(f"{category}_photo_missing")
         elif count > 1:
             anomalies.append(f"{category}_photo_conflict")
-    verification = group.get("barcode_verification")
-    barcode_status = ""
-    if isinstance(verification, Mapping):
-        barcode_status = str(verification.get("status") or "").strip().lower()
-    if not barcode_status:
-        barcode_status = str(group.get("barcode_status") or "").strip().lower()
-    if barcode_status not in MANUAL_CLASSIFICATION_BARCODE_READY:
-        anomalies.append("barcode_verification_required")
     for value, code in (
         (group.get("terminal"), "terminal_missing"),
         (group.get("meter_no"), "meter_missing"),
-        (effective_module_asset_no(group), "module_missing"),
+        (effective_module_asset_no(group, photos), "module_missing"),
         (group.get("address"), "address_missing"),
     ):
         if not str(value or "").strip():
@@ -161,7 +215,8 @@ def group_anomaly_evidence_fingerprint(group: Mapping[str, Any]) -> str:
         "fields": {
             "terminal": str(group.get("terminal") or "").strip(),
             "meter_no": str(group.get("meter_no") or "").strip(),
-            "module_asset_no": effective_module_asset_no(group),
+            "module_asset_no": effective_module_asset_no(group, photos),
+            "module_source_values": module_source_values(group, photos),
             "collector": effective_collector(group),
             "address": str(group.get("address") or "").strip(),
         },
@@ -217,20 +272,7 @@ def rebind_anomaly_resolutions(
 def group_anomalies(group: Mapping[str, Any]) -> list[dict[str, str]]:
     photos = active_photos(group)
     _snapshot, manual_codes = manual_classification_snapshot(group, photos)
-    _barcode_status, missing_fields, _progress = barcode_status_from_group(group)
-    normalized_missing_fields = {str(field).strip() for field in missing_fields if str(field).strip()}
-    collector_photo_present = any(
-        str(photo.get("category") or photo.get("construction_slot") or "").strip() == "collector_barcode"
-        for photo in photos
-    )
     collector_only_exception = is_only_missing_collector_photo_exception(group)
-    collector_evidence_gap = not effective_collector(group) or not collector_photo_present
-    collector_only_gap = collector_evidence_gap and (
-        normalized_missing_fields == {"collector"}
-        or (collector_only_exception and normalized_missing_fields.issubset({"collector"}))
-    )
-    if collector_only_gap:
-        manual_codes = [code for code in manual_codes if code != "barcode_verification_required"]
     if collector_only_exception:
         manual_codes = [code for code in manual_codes if code != "exception_open"]
 
@@ -247,13 +289,15 @@ def group_anomalies(group: Mapping[str, Any]) -> list[dict[str, str]]:
         if message:
             messages.setdefault(code, message)
 
-    for field, code in (
-        ("meter", "meter_barcode_mismatch"),
-        ("module", "module_barcode_mismatch"),
-        ("collector", "collector_barcode_mismatch"),
-    ):
-        if field in normalized_missing_fields and not (field == "collector" and collector_only_gap):
-            messages.setdefault(code, ANOMALY_MESSAGES[code])
+    source_modules = module_source_values(group, photos)
+    initial_modules = source_modules["initial_import"]
+    construction_modules = source_modules["construction"]
+    if initial_modules and construction_modules and set(initial_modules) != set(construction_modules):
+        messages.setdefault(
+            "module_channel_conflict",
+            "初始导入模块号（%s）与现场施工回传模块号（%s）不一致"
+            % ("、".join(initial_modules), "、".join(construction_modules)),
+        )
 
     for raw_reason in group.get("exception_reasons") or []:
         reason = str(raw_reason or "").strip()
@@ -312,6 +356,7 @@ def build_meter_module_workbook(rows: Iterable[Mapping[str, Any]]) -> bytes:
             "模块关联表号数",
             "表号候选模块数",
             "施工状态",
+            "数据入库时间",
         ]
     )
     construction_labels = {
@@ -337,6 +382,7 @@ def build_meter_module_workbook(rows: Iterable[Mapping[str, Any]]) -> bytes:
                 int(row.get("module_meter_count") or 0),
                 int(row.get("meter_candidate_count") or 0),
                 status,
+                value("ingested_at"),
             ]
         )
     sheet.freeze_panes = "A2"
@@ -354,6 +400,7 @@ def build_meter_module_workbook(rows: Iterable[Mapping[str, Any]]) -> bytes:
         "J": 18,
         "K": 18,
         "L": 14,
+        "M": 26,
     }.items():
         sheet.column_dimensions[column].width = width
     output = BytesIO()
@@ -392,6 +439,7 @@ def aggregate_meter_module_export_rows(
                 "meter_no": meter_no,
                 "module_asset_no": module_asset_no,
                 "construction_status": str(evidence.get("construction_status") or "").strip(),
+                "ingested_at": str(evidence.get("ingested_at") or "").strip(),
                 "_sources": set(),
                 "occurrence_count": 0,
             },
@@ -400,6 +448,13 @@ def aggregate_meter_module_export_rows(
             relation["address"] = str(evidence.get("address") or "").strip()
         if not relation["construction_status"]:
             relation["construction_status"] = str(evidence.get("construction_status") or "").strip()
+        incoming_ingested_at = str(evidence.get("ingested_at") or "").strip()
+        current_ingested_at = str(relation.get("ingested_at") or "").strip()
+        if incoming_ingested_at and (
+            not current_ingested_at
+            or datetime_sort_value(incoming_ingested_at) < datetime_sort_value(current_ingested_at)
+        ):
+            relation["ingested_at"] = incoming_ingested_at
         relation["occurrence_count"] += 1
         source = str(evidence.get("module_source") or "").strip()
         if source:
@@ -420,6 +475,8 @@ def aggregate_meter_module_export_rows(
             duplicate_reasons.append("同模块多表")
 
         sources = relation.pop("_sources")
+        if not str(relation.get("ingested_at") or "").strip():
+            relation.pop("ingested_at", None)
         ordered_sources = [source_labels[source] for source in source_order if source in sources]
         ordered_sources.extend(sorted(source for source in sources if source not in source_labels))
         relation.update(
@@ -446,6 +503,7 @@ def meter_module_export_rows_from_groups(
             "address": mapped["address"],
             "meter_no": mapped["meter_no"],
             "construction_status": mapped["construction_status"],
+            "ingested_at": group.get("created_at") or group.get("imported_at") or "",
         }
         evidence_rows.extend(
             {
@@ -472,6 +530,7 @@ def meter_module_export_rows_from_groups(
                         or raw.get("asset_no")
                     ),
                     "module_source": "photo",
+                    "ingested_at": photo.get("created_at") or photo.get("imported_at") or base["ingested_at"],
                 }
             )
     return aggregate_meter_module_export_rows(evidence_rows)
@@ -595,11 +654,32 @@ def construction_status_from_group(group: Mapping[str, Any], photo_count: int) -
 
 
 def archive_status_from_group(group: Mapping[str, Any], photos: list[Mapping[str, Any]]) -> str:
-    if photos and all(str(photo.get("archive_status") or "").strip() == "archived" for photo in photos):
-        return "archived"
-    if any(str(photo.get("archive_status") or "").strip() for photo in photos):
-        return "pending"
-    return "unarchived"
+    """Terminal archive state is explicit; individual photo classification never archives a terminal."""
+    raw = group.get("raw_data") if isinstance(group.get("raw_data"), Mapping) else {}
+    stored = str(group.get("archive_status") or raw.get("archive_status") or "").strip().lower()
+    return "archived" if stored == "archived" else "unarchived"
+
+
+def archive_eligibility_from_group(group: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the terminal-level manual-archive gate without treating collector evidence as required."""
+    photos = active_photos(group)
+    categories = {str(photo.get("category") or "").strip() for photo in photos}
+    blockers: list[str] = []
+    if not effective_module_asset_no(group, photos):
+        blockers.append(ANOMALY_MESSAGES["module_missing"])
+    for category in ARCHIVE_REQUIRED_PHOTO_SLOTS:
+        if category not in categories:
+            blockers.append(ANOMALY_MESSAGES[f"{category}_photo_missing"])
+
+    for anomaly in group_anomalies(group):
+        if anomaly.get("status") != "open":
+            continue
+        code = str(anomaly.get("code") or "")
+        message = str(anomaly.get("message") or "")
+        if code in MODULE_ARCHIVE_ANOMALY_CODES or "模块" in message:
+            blockers.append(message)
+    ordered_blockers = list(dict.fromkeys(blocker for blocker in blockers if blocker))
+    return {"ready": not ordered_blockers, "blockers": ordered_blockers}
 
 
 def exception_status_from_group(group: Mapping[str, Any]) -> str:
@@ -624,6 +704,7 @@ def status_from_group(group: Mapping[str, Any]) -> str:
 
 def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
     photos = active_photos(group)
+    source_modules = module_source_values(group, photos)
     photo_count = int(group.get("photo_count") or 0)
     classification = (
         dict(group.get("classification_progress") or {})
@@ -635,6 +716,7 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
     barcode_status, missing_fields, barcode_progress = barcode_status_from_group(group)
     manual_confirmation = group.get("classification_manual_confirmation")
     confirmation_snapshot, confirmation_anomalies = manual_classification_snapshot(group, photos)
+    archive_eligibility = archive_eligibility_from_group(group)
     return {
         "kind": "group",
         "id": str(group.get("id") or group.get("legacy_id") or "").strip(),
@@ -643,9 +725,10 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
         "meter_match_key": str(group.get("meter_match_key") or "").strip(),
         "address": str(group.get("address") or group.get("installation_address") or "").strip(),
         "collector": effective_collector(group),
-        "module_asset_no": effective_module_asset_no(group),
+        "module_asset_no": effective_module_asset_no(group, photos),
+        "module_source_values": source_modules,
         "construction_collector": str(group.get("construction_collector") or "").strip(),
-        "construction_module_asset_no": str(group.get("construction_module_asset_no") or "").strip(),
+        "construction_module_asset_no": (source_modules["construction"] or [""])[0],
         "installer": str(group.get("installer") or group.get("constructor") or group.get("creator") or "").strip(),
         "photo_count": photo_count,
         "classification_status": classification["status"],
@@ -663,6 +746,8 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
         "group_barcode_missing_fields": missing_fields,
         "construction_status": construction_status_from_group(group, photo_count),
         "archive_status": archive_status_from_group(group, photos),
+        "archive_ready": archive_eligibility["ready"],
+        "archive_blockers": archive_eligibility["blockers"],
         "exception_status": exception_status_from_group(group),
         "status": status_from_group(group),
         "updated_at": group.get("updated_at") or group.get("last_photo_imported_at") or "",

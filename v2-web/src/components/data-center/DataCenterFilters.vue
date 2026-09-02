@@ -2,8 +2,6 @@
 import { Camera, Refresh, Search } from '@element-plus/icons-vue'
 
 import type {
-  DataCenterBarcodeEligibility,
-  DataCenterBarcodeFilterStatus,
   DataCenterDataType,
   DataCenterInstallerSource,
 } from '@/api/types'
@@ -36,26 +34,7 @@ const constructionOptions = [
 const archiveOptions = [
   { label: '归档', value: 'all' },
   { label: '未归档', value: 'unarchived' },
-  { label: '待归档', value: 'pending' },
   { label: '已归档', value: 'archived' },
-]
-
-const barcodeOptions: Array<{ label: string; value: DataCenterBarcodeFilterStatus }> = [
-  { label: '核验通过', value: 'verified' },
-  { label: '待人工', value: 'needs_review' },
-  { label: '扫码', value: 'all' },
-  { label: '通过', value: 'passed' },
-  { label: '人工确认', value: 'manual_confirmed' },
-  { label: '不一致', value: 'mismatched' },
-  { label: '失败', value: 'failed' },
-  { label: '不可读', value: 'unreadable' },
-  { label: '不适用', value: 'ineligible' },
-]
-
-const barcodeEligibilityOptions: Array<{ label: string; value: DataCenterBarcodeEligibility }> = [
-  { label: '条码资格', value: 'all' },
-  { label: '符合', value: 'eligible' },
-  { label: '不符合', value: 'ineligible' },
 ]
 
 const classificationOptions = [
@@ -111,12 +90,6 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
     <el-select :model-value="props.modelValue.archiveStatus" @update:model-value="update('archiveStatus', String($event || 'all'))">
       <el-option v-for="item in archiveOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
-    <el-select :model-value="props.modelValue.barcodeStatus" @update:model-value="update('barcodeStatus', ($event || 'all') as DataCenterBarcodeFilterStatus)">
-      <el-option v-for="item in barcodeOptions" :key="item.value" :label="item.label" :value="item.value" />
-    </el-select>
-    <el-select :model-value="props.modelValue.barcodeEligibility" @update:model-value="update('barcodeEligibility', ($event || 'all') as DataCenterBarcodeEligibility)">
-      <el-option v-for="item in barcodeEligibilityOptions" :key="item.value" :label="item.label" :value="item.value" />
-    </el-select>
     <el-select :model-value="props.modelValue.classificationStatus" @update:model-value="update('classificationStatus', String($event || 'all'))">
       <el-option v-for="item in classificationOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
@@ -159,7 +132,7 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
 <style scoped>
 .data-center-filters {
   display: grid;
-  grid-template-columns: minmax(220px, 1.3fr) repeat(7, minmax(104px, 0.7fr)) minmax(120px, 0.7fr) repeat(3, minmax(116px, 0.7fr)) auto;
+  grid-template-columns: minmax(220px, 1.3fr) repeat(5, minmax(104px, 0.7fr)) minmax(120px, 0.7fr) repeat(3, minmax(116px, 0.7fr)) auto;
   gap: 8px;
   align-items: center;
 }

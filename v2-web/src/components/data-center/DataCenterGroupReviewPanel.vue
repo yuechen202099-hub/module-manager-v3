@@ -10,19 +10,18 @@ import {
   fetchDataCenterDetail,
   fetchGroupPhotoObjectUrl,
   getApiErrorStatus,
+  manualArchiveDataCenterGroup,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
   resolveDataCenterGroupAnomaly,
   returnDataCenterGroupToException,
   reviewDataCenterGroup,
-  scanDataCenterGroupPhotoRegion,
   updateDataCenterGroup,
   uploadGroupImages,
 } from '@/api/services'
 import type {
   DataCenterDetail,
   GlobalMeterInstallWorkbenchRow,
-  RegionScanResult,
 } from '@/api/types'
 import Code128Barcode from '@/components/Code128Barcode.vue'
 import PhotoLightbox from '@/components/PhotoLightbox.vue'
@@ -81,6 +80,12 @@ const form = reactive({
 
 const activePhoto = computed(() => detail.value?.photos.find((photo) => photo.id === selectedPhotoId.value) || null)
 const activePhotoUrl = computed(() => activePhoto.value ? photoObjectUrls.get(activePhoto.value.id) || '' : '')
+const moduleSourceValues = computed(() => detail.value?.moduleSourceValues || {
+  initialImport: [],
+  construction: [],
+})
+const archiveReady = computed(() => Boolean(detail.value?.archiveReady))
+const archiveBlockers = computed(() => detail.value?.archiveBlockers || [])
 const categoryOptions = [
   { value: 'before_box', label: '施工前' },
   { value: 'collector_barcode', label: '采集器条码' },
@@ -121,9 +126,6 @@ const manualClassificationWarnings = computed(() => {
     const count = categories.filter((value) => value === category).length
     if (count === 0) warnings.push(`缺少${label}`)
     else if (count > 1) warnings.push(`${label}存在重复分类`)
-  }
-  if (!['passed', 'manual', 'manual_confirmed', 'manual_passed'].includes(detail.value.barcodeStatus)) {
-    warnings.push('条码状态未通过')
   }
   for (const [value, label] of [
     [detail.value.terminal, '终端号'],
@@ -431,43 +433,6 @@ async function resolveAnomaly(anomaly: DataCenterDetail['anomalies'][number]) {
   }
 }
 
-function targetField(type: RegionScanResult['barcodeType']) {
-  return type === 'collector' ? 'collector' : type === 'module' ? 'moduleAssetNo' : 'meterNo'
-}
-
-async function handleRegionScan(request: { barcodeType: RegionScanResult['barcodeType']; region: RegionScanResult['region'] }) {
-  if (!detail.value || !activePhoto.value) return
-  const groupId = detail.value.id
-  const photoId = activePhoto.value.id
-  const owner = beginMutation(groupId)
-  try {
-    const result = await scanDataCenterGroupPhotoRegion(
-      groupId,
-      photoId,
-      request,
-      form.reason.trim() || '数据中台框选扫码',
-    )
-    if (!isCurrentMutation(owner)) return
-    const value = (result.normalizedValues[0] || result.values[0] || '').trim()
-    if (!value) {
-      ElMessage.warning('当前选区未识别到可用内容')
-      return
-    }
-    await ElMessageBox.confirm(`确认写入识别值 ${value}？`, '识别结果确认', {
-      type: 'warning',
-      confirmButtonText: '确认写入',
-      cancelButtonText: '取消',
-    })
-    if (!isCurrentMutation(owner)) return
-    form[targetField(result.barcodeType)] = value
-    inspector.value?.finishSubmission()
-  } catch (error) {
-    if (error !== 'cancel') showMutationError(owner, error, '框选扫码失败')
-  } finally {
-    finishMutation(owner)
-  }
-}
-
 async function saveReview() {
   if (!detail.value) return
   const currentDetail = detail.value
@@ -484,6 +449,31 @@ async function saveReview() {
     await reloadAfterMutation(owner)
   } catch (error) {
     showMutationError(owner, error, '保存失败')
+  } finally {
+    finishMutation(owner)
+  }
+}
+
+async function archiveManually() {
+  if (!detail.value || !archiveReady.value || detail.value.archiveStatus === 'archived') return
+  const groupId = detail.value.id
+  try {
+    await ElMessageBox.confirm(
+      '归档后该终端将从未归档工作列表中隐藏。请确认模块号、模块与电能表照片及改造完成照片均无异常。',
+      '确认手动归档',
+      { type: 'warning', confirmButtonText: '确认归档', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const owner = beginMutation(groupId)
+  try {
+    await manualArchiveDataCenterGroup(groupId)
+    if (!isCurrentMutation(owner)) return
+    const next = await reloadAfterMutation(owner)
+    if (next) ElMessage.success('终端已归档')
+  } catch (error) {
+    showMutationError(owner, error, '归档失败')
   } finally {
     finishMutation(owner)
   }
@@ -803,7 +793,6 @@ onBeforeUnmount(cleanupDetail)
               :alt="activePhoto?.categoryLabel || activePhoto?.category || '资料组照片'"
               :loading="imageLoading || saving"
               :disabled="saving"
-              @scan="handleRegionScan"
             />
             <div v-else class="photo-placeholder">图片加载中</div>
           </div>
@@ -868,14 +857,32 @@ onBeforeUnmount(cleanupDetail)
         </header>
         <el-form label-position="top" class="field-grid">
           <el-form-item label="表号"><el-input v-model="form.meterNo" data-testid="meter-no-input" /></el-form-item>
-          <el-form-item label="模块"><el-input v-model="form.moduleAssetNo" data-testid="module-no-input" /></el-form-item>
+          <el-form-item label="模块（统一修改）"><el-input v-model="form.moduleAssetNo" data-testid="module-no-input" /></el-form-item>
           <el-form-item label="采集器"><el-input v-model="form.collector" data-testid="collector-no-input" /></el-form-item>
           <el-form-item label="原因" class="wide-field"><el-input v-model="form.reason" data-testid="save-reason-input" /></el-form-item>
         </el-form>
 
+        <section class="module-source-values" data-testid="module-source-values">
+          <header><strong>模块号来源</strong><span>保存后将统一同步两个渠道及关联有效照片</span></header>
+          <div><strong>初始导入</strong><span>{{ moduleSourceValues.initialImport.join('、') || '未提供' }}</span></div>
+          <div><strong>现场施工回传</strong><span>{{ moduleSourceValues.construction.join('、') || '未提供' }}</span></div>
+        </section>
+
         <div class="action-strip">
           <el-button type="primary" :loading="saving" @click="saveReview">保存</el-button>
         </div>
+
+        <section class="archive-action" data-testid="manual-archive-action">
+          <el-button
+            type="success"
+            :loading="saving"
+            :disabled="saving || detail.archiveStatus === 'archived' || !archiveReady"
+            @click="archiveManually"
+          >{{ detail.archiveStatus === 'archived' ? '已归档' : '手动归档' }}</el-button>
+          <span v-if="detail.archiveStatus === 'archived'">该终端已归档</span>
+          <span v-else-if="archiveReady">已满足归档条件；缺采集器照片不会阻止归档</span>
+          <span v-else>{{ archiveBlockers.join('；') || '暂不满足归档条件' }}</span>
+        </section>
 
         <div class="category-grid" data-testid="photo-category-actions">
           <el-button
@@ -1005,6 +1012,7 @@ onBeforeUnmount(cleanupDetail)
 .photo-tabs button, .stage-switch button { min-width: 0; padding: 8px; border: 1px solid var(--v2-border); border-radius: 8px; background: #fff; color: var(--v2-text); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .photo-tabs button.active, .stage-switch button.active { border-color: var(--v2-accent); color: var(--v2-accent); }
 .stage-switch, .action-strip, .decision-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.archive-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--v2-border); border-radius: 8px; background: var(--v2-surface-soft); color: var(--v2-text-muted); font-size: 12px; }
 .photo-mutation-strip { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .photo-file-input { display: none; }
 .rephoto-stage, .rephoto-identifiers, .rephoto-slots { display: grid; gap: 12px; }
@@ -1015,6 +1023,11 @@ onBeforeUnmount(cleanupDetail)
 .rephoto-slots img { display: block; width: 100%; height: 240px; object-fit: contain; }
 .group-summary { display: flex; flex-wrap: wrap; gap: 10px; color: var(--v2-text-muted); }
 .group-summary strong { color: var(--v2-text-strong); }
+.module-source-values { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--v2-border); border-radius: 8px; background: var(--v2-surface-soft); }
+.module-source-values > header, .module-source-values > div { display: flex; justify-content: space-between; gap: 10px; }
+.module-source-values > header { color: var(--v2-text-muted); font-size: 12px; }
+.module-source-values > header strong, .module-source-values > div > strong { color: var(--v2-text-strong); }
+.module-source-values > div > span { word-break: break-all; text-align: right; }
 .field-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 10px; }
 .wide-field { grid-column: 1 / -1; }
 .category-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }

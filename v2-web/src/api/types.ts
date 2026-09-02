@@ -391,20 +391,13 @@ export type GroupSearchResult = {
 
 export type DataCenterDataType = 'all' | 'group' | 'unmatched'
 export type DataCenterPageSize = 20 | 50 | 100
-export type DataCenterBarcodeFilterStatus =
-  | 'all'
-  | 'passed'
-  | 'manual'
-  | 'manual_confirmed'
-  | 'mismatched'
-  | 'failed'
-  | 'unreadable'
-  | 'ineligible'
-  | 'verified'
-  | 'needs_review'
-export type DataCenterBarcodeEligibility = 'all' | 'eligible' | 'ineligible'
 export type DataCenterInstallerSource = 'all' | 'photo'
 export type DataCenterTerminalFilterStatus = 'all' | 'completed' | 'incomplete' | 'pending_archive' | 'archived'
+
+export type ModuleSourceValues = {
+  initialImport: string[]
+  construction: string[]
+}
 
 export type DataCenterRow = {
   kind: 'group' | 'unmatched'
@@ -415,17 +408,17 @@ export type DataCenterRow = {
   address: string
   collector: string
   moduleAssetNo: string
+  moduleSourceValues: ModuleSourceValues
   constructionCollector: string
   constructionModuleAssetNo: string
   installer: string
   photoCount: number
   classificationStatus: string
   classificationProgress: Record<string, unknown>
-  barcodeStatus: string
-  barcodeProgress: Record<string, unknown>
-  groupBarcodeMissingFields: string[]
   constructionStatus: string
   archiveStatus: string
+  archiveReady: boolean
+  archiveBlockers: string[]
   exceptionStatus: string
   reviewStatus: string
   updatedAt: string

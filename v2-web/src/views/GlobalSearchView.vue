@@ -23,9 +23,9 @@ const {
 } = useDataCenterQuery()
 
 function statusType(value: string) {
-  if (['archived', 'passed', 'manual', 'manual_confirmed', 'complete', 'completed'].includes(value)) return 'success'
-  if (['pending', 'in_progress', 'unreadable'].includes(value)) return 'warning'
-  if (['mismatched', 'failed', 'open', 'incomplete'].includes(value)) return 'danger'
+  if (['archived', 'complete', 'completed'].includes(value)) return 'success'
+  if (['pending', 'in_progress'].includes(value)) return 'warning'
+  if (['open', 'incomplete'].includes(value)) return 'danger'
   return 'info'
 }
 
@@ -39,16 +39,6 @@ const archiveLabels: Record<string, string> = {
   unarchived: '未归档',
   pending: '待归档',
   archived: '已归档',
-}
-
-const barcodeLabels: Record<string, string> = {
-  passed: '通过',
-  manual: '人工',
-  manual_confirmed: '人工确认',
-  mismatched: '不一致',
-  failed: '失败',
-  unreadable: '不可读',
-  ineligible: '不适用',
 }
 
 const classificationLabels: Record<string, string> = {
@@ -111,8 +101,6 @@ function handlePageSize(size: number) {
           constructionStatus: 'all',
           terminalStatus: 'all',
           archiveStatus: 'all',
-          barcodeStatus: 'all',
-          barcodeEligibility: 'all',
           classificationStatus: 'all',
           exceptionStatus: '',
           installer: '',
@@ -176,13 +164,6 @@ function handlePageSize(size: number) {
           <template #default="{ row }">
             <el-tag size="small" effect="plain" :type="statusType(row.archiveStatus)">
               {{ labelOf(archiveLabels, row.archiveStatus) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="扫码" width="106">
-          <template #default="{ row }">
-            <el-tag size="small" effect="plain" :type="statusType(row.barcodeStatus)">
-              {{ labelOf(barcodeLabels, row.barcodeStatus) }}
             </el-tag>
           </template>
         </el-table-column>

@@ -7225,6 +7225,10 @@ def bulk_archive_groups(group_ids: list[str], actor: str, reason: str = "") -> d
         if group is None:
             skipped.append({"group_id": group_id, "reason": "not_found"})
             continue
+        eligibility = data_center_service.archive_eligibility_from_group(group)
+        if not eligibility["ready"]:
+            skipped.append({"group_id": group_id, "reason": "; ".join(eligibility["blockers"])})
+            continue
         photos = [photo for photo in group.get("photos", []) if photo.get("is_active", True)]
         if not photos:
             skipped.append({"group_id": group_id, "reason": "no_active_photos"})
@@ -7750,18 +7754,21 @@ def is_group_fully_archived(group: dict[str, Any]) -> bool:
 def update_group_archive_status(group: dict[str, Any], reviewer: str) -> None:
     if not is_group_fully_archived(group):
         return
-    reasons = validate_group_archive(group)
-    set_group_exception_flags(group, reasons)
-    if reasons:
+    eligibility = data_center_service.archive_eligibility_from_group(group)
+    blockers = list(eligibility["blockers"])
+    if blockers:
+        set_group_exception_flags(group, blockers)
         group["status"] = "exception"
-        group["exception_note"] = "; ".join(display_exception_reasons(reasons))
-        append_audit_event("archive_blocked", reviewer, {"group_id": group["id"], "reasons": reasons})
+        group["exception_note"] = "; ".join(blockers)
+        append_audit_event("archive_blocked", reviewer, {"group_id": group["id"], "reasons": blockers})
         return
+    set_group_exception_flags(group, [])
     group["status"] = "approved"
     group["reviewer"] = reviewer
     group["review_note"] = "分类完成"
     group["exception_note"] = ""
     group["reviewed_at"] = now_iso()
+    group["archive_status"] = "archived"
     schedule_delivery_cache_build(group["id"], current_team_id())
 
 

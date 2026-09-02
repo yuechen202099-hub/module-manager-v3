@@ -98,6 +98,7 @@ DATA_CENTER_IDENTITY_FIELDS = {
     "construction_collector",
     "construction_module_asset_no",
 }
+MODULE_SOURCE_VALUE_SEPARATOR = "\x1f"
 
 
 def _synchronize_data_center_identity_patch(patch: Mapping[str, Any]) -> dict[str, Any]:
@@ -2812,6 +2813,67 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def manual_archive_data_center_group(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def first_pass_archive_data_center_groups(
+        self,
+        *,
+        actor: str = "system-first-pass-archive",
+    ) -> dict[str, Any]:
+        """Run the one permitted system archive pass using the normal archive gate.
+
+        Candidate ids are captured before mutation, so each terminal is checked at
+        most once. Every archive is then revalidated by the backend-specific
+        manual archive transaction to protect against a concurrent edit.
+        """
+        query = DataCenterQuery(data_type="group", archive_status="unarchived", page=1, page_size=100)
+        candidates: list[str] = []
+        skipped: list[dict[str, str]] = []
+        scanned_count = 0
+        while True:
+            page = self.list_data_center_rows(query)
+            items = list(page.get("items") or [])
+            scanned_count += len(items)
+            for row in items:
+                group_id = str(row.get("id") or "").strip()
+                if not group_id:
+                    continue
+                if bool(row.get("archive_ready")):
+                    candidates.append(group_id)
+                else:
+                    blockers = [str(item).strip() for item in row.get("archive_blockers") or [] if str(item).strip()]
+                    skipped.append({"group_id": group_id, "reason": "; ".join(blockers) or "不满足归档条件"})
+            if query.page * query.page_size >= int(page.get("total") or 0):
+                break
+            query = query.model_copy(update={"page": query.page + 1})
+
+        archived_group_ids: list[str] = []
+        for group_id in candidates:
+            try:
+                self.manual_archive_data_center_group(
+                    group_id,
+                    actor=actor,
+                    source_page="system_first_pass_archive",
+                )
+            except (KeyError, ValueError) as exc:
+                skipped.append({"group_id": group_id, "reason": str(exc)})
+            else:
+                archived_group_ids.append(group_id)
+        return {
+            "scanned_count": scanned_count,
+            "archived_count": len(archived_group_ids),
+            "archived_group_ids": archived_group_ids,
+            "skipped": skipped,
+        }
+
+    @abstractmethod
     def return_data_center_group_to_exception_order(
         self,
         group_id: str,
@@ -3869,9 +3931,6 @@ class JsonStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
-        from app.services.barcode_maintenance_worker import _auto_archive_json_in_state
-        from app.services.group_barcode_verification import evaluate_group_eligibility
-
         if category not in local_simulation.PHOTO_CATEGORIES:
             raise ValueError(f"Unsupported photo category: {category}")
         team_id = local_simulation.current_team_id()
@@ -3930,7 +3989,6 @@ class JsonStateRepository(StateRepository):
                 str(photo.get("image_url") or ""),
             )
             photo["archived_at"] = now
-            photo.update(photo_barcode_check.check_photo_barcode(photo, group))
             after = {
                 "category": str(photo.get("category") or ""),
                 "archive_status": str(photo.get("archive_status") or ""),
@@ -3963,22 +4021,7 @@ class JsonStateRepository(StateRepository):
                 ),
             )
             package_status = ""
-            eligibility = evaluate_group_eligibility(group)
-            verification = dict(group.get("barcode_verification") or {})
-            fingerprint = str(verification.get("evidence_fingerprint") or "")
-            current_fingerprint = str(eligibility.evidence_fingerprint or "")
-            authoritative = (
-                eligibility.status == "pending"
-                and str(verification.get("status") or "") in {"passed", "manual_confirmed"}
-                and (not fingerprint or fingerprint == current_fingerprint)
-            )
-            if authoritative:
-                archive_result = _auto_archive_json_in_state(state, group_id, actor=actor)
-                if archive_result.get("archived") or _data_center_archive_status(group) == "archived":
-                    package_status = _json_request_data_center_delivery_package(group, actor=actor)
-            else:
-                archive_result = {"archived": False, "group_id": group_id, "reason": "not_authoritative_ready"}
-                local_simulation.schedule_delivery_cache_build(group_id, reason="data_center_photo_classified")
+            archive_result = {"archived": False, "group_id": group_id, "reason": "manual_archive_required"}
             local_simulation.refresh_summary()
             if owns_transaction:
                 local_simulation.finish_authoritative_json_write(transaction, token)
@@ -4149,25 +4192,52 @@ class JsonStateRepository(StateRepository):
             actor=actor,
             reason=reason,
         )
-        from app.services.barcode_maintenance_worker import _auto_archive_json_in_state
-
-        state = local_simulation.get_state()
-        archive_result = _auto_archive_json_in_state(
-            state,
-            group_id,
-            actor=actor,
-        )
         group = local_simulation.get_group(group_id)
         if group is None:
             raise KeyError(group_id)
-        package_status = ""
-        if archive_result.get("archived") or _data_center_archive_status(group) == "archived":
-            package_status = _json_request_data_center_delivery_package(group, actor=actor)
         return _data_center_group_result(
             group,
-            delivery_package_job_status=package_status,
-            archive_result=archive_result,
+            archive_result={"archived": False, "group_id": group_id, "reason": "manual_archive_required"},
         )
+
+    def manual_archive_data_center_group(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        system_first_pass = source_page == "system_first_pass_archive"
+        reason_text = "首轮系统归档" if system_first_pass else "审阅工作台手动归档"
+        audit_action = "data_center_group_first_pass_archived" if system_first_pass else "data_center_group_manually_archived"
+
+        def operation() -> dict[str, Any]:
+            result = local_simulation.bulk_archive_groups(
+                [group_id],
+                actor=actor,
+                reason=reason_text,
+            )
+            if not result["archived_count"]:
+                reason = str((result.get("skipped") or [{}])[0].get("reason") or "不满足归档条件")
+                raise ValueError(f"当前终端不能归档：{reason}")
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            local_simulation.append_audit_event(
+                audit_action,
+                actor,
+                _data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason_text,
+                    before={"archive_status": "unarchived"},
+                    after={"archive_status": "archived"},
+                    group_id=group_id,
+                ),
+            )
+            return _data_center_group_result(group, archive_result={"archived": True, "group_id": group_id})
+
+        return self._authoritative_mutation(operation)
 
     def return_data_center_group_to_exception_order(
         self,
@@ -5460,6 +5530,11 @@ class PostgresStateRepository(StateRepository):
             cast(Photo.created_at, String),
         )
         construction_photo_filter = _photo_construction_source_filter()
+        photo_module_asset_no = func.coalesce(
+            func.nullif(func.trim(Photo.asset_no), ""),
+            func.nullif(func.trim(Photo.raw_data.op("->>")("module_asset_no")), ""),
+            func.nullif(func.trim(Photo.raw_data.op("->>")("asset_no")), ""),
+        )
         active_photo_stats = (
             select(
                 Photo.group_id.label("group_id"),
@@ -5474,6 +5549,14 @@ class PostgresStateRepository(StateRepository):
                 func.count(
                     func.distinct(case((Photo.category.in_(required_categories), Photo.category), else_=None))
                 ).label("required_category_count"),
+                func.string_agg(
+                    func.distinct(case((~construction_photo_filter, photo_module_asset_no), else_=None)),
+                    literal(MODULE_SOURCE_VALUE_SEPARATOR),
+                ).label("initial_import_photo_modules"),
+                func.string_agg(
+                    func.distinct(case((construction_photo_filter, photo_module_asset_no), else_=None)),
+                    literal(MODULE_SOURCE_VALUE_SEPARATOR),
+                ).label("construction_photo_module"),
                 func.max(case((construction_photo_filter, photo_activity_at), else_=None)).label("activity_at"),
             )
             .where(
@@ -5563,7 +5646,6 @@ class PostgresStateRepository(StateRepository):
                 ),
                 literal("archived"),
             ),
-            (func.coalesce(active_photo_stats.c.archive_state_count, 0) > 0, literal("pending")),
             else_=literal("unarchived"),
         )
         group_select = (
@@ -5578,8 +5660,13 @@ class PostgresStateRepository(StateRepository):
                 func.coalesce(group_raw.op("->>")("module_asset_no"), group_raw.op("->>")("asset_no")).label(
                     "module_asset_no"
                 ),
+                func.coalesce(group_raw.op("->>")("module_asset_no"), group_raw.op("->>")("asset_no")).label(
+                    "initial_import_module"
+                ),
+                active_photo_stats.c.initial_import_photo_modules.label("initial_import_photo_modules"),
                 group_raw.op("->>")("construction_collector").label("construction_collector"),
                 group_raw.op("->>")("construction_module_asset_no").label("construction_module_asset_no"),
+                active_photo_stats.c.construction_photo_module.label("construction_photo_module"),
                 group_installer.label("installer"),
                 group_photo_count.label("photo_count"),
                 func.coalesce(active_photo_stats.c.required_category_count, 0).label("required_category_count"),
@@ -5598,6 +5685,7 @@ class PostgresStateRepository(StateRepository):
                     ),
                 ).label("exception_status"),
                 active_photo_stats.c.activity_at.label("activity_at"),
+                MaterialGroup.created_at.label("created_at"),
                 MaterialGroup.updated_at.label("updated_at"),
                 MaterialGroup.raw_data.label("raw_data"),
             )
@@ -5625,8 +5713,11 @@ class PostgresStateRepository(StateRepository):
             UnmatchedRecord.address.label("address"),
             UnmatchedRecord.collector.label("collector"),
             UnmatchedRecord.module_asset_no.label("module_asset_no"),
+            UnmatchedRecord.module_asset_no.label("initial_import_module"),
+            literal("").label("initial_import_photo_modules"),
             literal("").label("construction_collector"),
             literal("").label("construction_module_asset_no"),
+            literal("").label("construction_photo_module"),
             func.coalesce(
                 unmatched_payload.op("->>")("assigned_to"),
                 unmatched_payload.op("->>")("creator"),
@@ -5648,6 +5739,7 @@ class PostgresStateRepository(StateRepository):
             literal("ineligible").label("barcode_status"),
             UnmatchedRecord.status.label("exception_status"),
             cast(UnmatchedRecord.updated_at, String).label("activity_at"),
+            UnmatchedRecord.created_at.label("created_at"),
             UnmatchedRecord.updated_at.label("updated_at"),
             UnmatchedRecord.payload.label("raw_data"),
         ).where(
@@ -5778,6 +5870,25 @@ class PostgresStateRepository(StateRepository):
     @staticmethod
     def _data_center_row_from_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
         raw = dict(row.get("raw_data") or {})
+        def module_values(*values: Any) -> list[str]:
+            result: list[str] = []
+            for value in values:
+                for item in str(value or "").split(MODULE_SOURCE_VALUE_SEPARATOR):
+                    normalized = item.strip()
+                    if normalized and normalized not in result:
+                        result.append(normalized)
+            return result
+
+        module_source_values = {
+            "initial_import": module_values(
+                row.get("initial_import_module") or row.get("module_asset_no"),
+                row.get("initial_import_photo_modules"),
+            ),
+            "construction": module_values(
+                row.get("construction_module_asset_no"),
+                row.get("construction_photo_module"),
+            ),
+        }
         base = {
             "id": row.get("legacy_id") or "",
             "terminal": row.get("terminal") or "",
@@ -5785,7 +5896,8 @@ class PostgresStateRepository(StateRepository):
             "meter_match_key": row.get("meter_match_key") or "",
             "address": row.get("address") or "",
             "collector": row.get("collector") or "",
-            "module_asset_no": row.get("module_asset_no") or "",
+            "module_asset_no": row.get("initial_import_module") or row.get("module_asset_no") or "",
+            "module_source_values": module_source_values,
             "construction_collector": row.get("construction_collector") or "",
             "construction_module_asset_no": row.get("construction_module_asset_no") or "",
             "installer": row.get("installer") or "",
@@ -5854,6 +5966,7 @@ class PostgresStateRepository(StateRepository):
                     original_module.label("module_asset_no"),
                     literal("original").label("module_source"),
                     group_source.c.construction_status,
+                    group_source.c.created_at.label("ingested_at"),
                 )
                 .select_from(group_source)
                 .where(original_module.is_not(None))
@@ -5866,6 +5979,7 @@ class PostgresStateRepository(StateRepository):
                     construction_module.label("module_asset_no"),
                     literal("construction").label("module_source"),
                     group_source.c.construction_status,
+                    group_source.c.created_at.label("ingested_at"),
                 )
                 .select_from(group_source)
                 .where(construction_module.is_not(None))
@@ -5878,6 +5992,7 @@ class PostgresStateRepository(StateRepository):
                     photo_module.label("module_asset_no"),
                     literal("photo").label("module_source"),
                     group_source.c.construction_status,
+                    Photo.created_at.label("ingested_at"),
                 )
                 .select_from(group_source)
                 .join(
@@ -8807,12 +8922,8 @@ class PostgresStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
-        from app.services.group_barcode_verification import evaluate_group_eligibility
-
         if category not in local_simulation.PHOTO_CATEGORIES:
             raise ValueError(f"Unsupported photo category: {category}")
-        should_enqueue = False
-        package_status = ""
         group_payload: dict[str, Any] = {}
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -8863,72 +8974,7 @@ class PostgresStateRepository(StateRepository):
                     "archived_at": photo.archived_at.isoformat(),
                 }
             )
-            raw_data.update(
-                photo_barcode_check.check_photo_barcode(
-                    {
-                        **_photo_payload(photo),
-                        "category": category,
-                        "category_label": category_label,
-                        "image_url": image_url,
-                    },
-                    _group_barcode_context(group),
-                )
-            )
             photo.raw_data = raw_data
-            photos = list(
-                session.scalars(
-                    select(Photo)
-                    .where(Photo.team_id == group.team_id, Photo.group_id == group.id, Photo.is_active.is_(True))
-                    .with_for_update()
-                ).all()
-            )
-            eligibility = evaluate_group_eligibility(
-                _verification_group_payload(session, group, prefetched_photos=photos)
-            )
-            verification = session.scalar(
-                select(GroupBarcodeVerification)
-                .where(
-                    GroupBarcodeVerification.team_id == group.team_id,
-                    GroupBarcodeVerification.group_id == group.id,
-                )
-                .with_for_update()
-            )
-            persisted = dict((group.raw_data or {}).get("barcode_verification") or {})
-            verification_result = dict(persisted.get("result") or getattr(verification, "result", None) or {})
-            verification_payload = {
-                **persisted,
-                "status": getattr(verification, "status", persisted.get("status", "")),
-                "evidence_fingerprint": getattr(
-                    verification,
-                    "evidence_fingerprint",
-                    persisted.get("evidence_fingerprint"),
-                ),
-                "evidence_version": getattr(verification, "evidence_version", persisted.get("evidence_version", 0)),
-                "meter_matched": getattr(verification, "meter_matched", persisted.get("meter_matched")),
-                "module_matched": getattr(verification, "module_matched", persisted.get("module_matched")),
-                "collector_matched": getattr(verification, "collector_matched", persisted.get("collector_matched")),
-                "recognition_source": getattr(
-                    verification,
-                    "recognition_source",
-                    persisted.get("recognition_source", ""),
-                ),
-                "result": verification_result,
-            }
-            authoritative = (
-                verification is not None
-                and eligibility.status == "pending"
-                and str(verification_payload.get("status") or "") in {"passed", "manual_confirmed"}
-                and str(verification_payload.get("evidence_fingerprint") or "")
-                == str(eligibility.evidence_fingerprint or "")
-                and verification_payload.get("meter_matched") is True
-                and verification_payload.get("module_matched") is True
-                and verification_payload.get("collector_matched") is True
-                and int(verification_result.get("passed_count") or 0) == 3
-                and str(verification_payload.get("recognition_source") or "")
-                in {"machine_barcode", "machine_qr", "manual_confirmed", "manual"}
-                and _legacy_group_status(group) in {"", "pending", "unreviewed", "in_review", "incomplete"}
-                and not bool(getattr(group, "has_archive_blocker", False))
-            )
             from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
 
             invalidate_postgres_delivery_cache_for_group_change(
@@ -8937,80 +8983,6 @@ class PostgresStateRepository(StateRepository):
                 actor=actor,
                 reason="data_center_photo_classified",
             )
-            if authoritative:
-                archive_now = datetime.now(UTC)
-                for item in photos:
-                    item.archive_status = "archived"
-                    item.archived_at = archive_now
-                    item.classified_by = item.classified_by or actor
-                    item_raw = dict(item.raw_data or {})
-                    item_raw.update(
-                        {
-                            "archive_status": "archived",
-                            "archived_at": archive_now.isoformat(),
-                            "classified_by": item.classified_by,
-                        }
-                    )
-                    item.raw_data = item_raw
-                group.status = GroupStatus.APPROVED
-                group.reviewer = actor
-                group.review_note = "barcode verification auto archive"
-                group.reviewed_at = archive_now
-                group_raw = dict(group.raw_data or {})
-                next_verification = {
-                    **verification_payload,
-                    "auto_archive_status": "archived",
-                    "auto_archived_at": archive_now.isoformat(),
-                    "auto_archive_lease_owner": None,
-                    "auto_archive_lease_token": None,
-                    "auto_archive_lease_expires_at": None,
-                    "auto_archive_error": "",
-                }
-                group_raw.update(
-                    {
-                        "status": "approved",
-                        "archive_status": "archived",
-                        "reviewer": actor,
-                        "review_note": "barcode verification auto archive",
-                        "reviewed_at": archive_now.isoformat(),
-                        "barcode_verification": next_verification,
-                    }
-                )
-                group.raw_data = group_raw
-                verification.auto_archive_status = "archived"
-                verification.auto_archived_at = archive_now
-                verification.auto_archive_lease_owner = None
-                verification.auto_archive_lease_token = None
-                verification.auto_archive_lease_expires_at = None
-                verification.auto_archive_error = None
-                should_enqueue = True
-                group_payload = _group_payload(session, group, include_photos=True, verification=verification)
-                package_status = self._stage_data_center_auto_archive_delivery_jobs(
-                    session,
-                    group,
-                    group_payload=group_payload,
-                    actor=actor,
-                    reason="data_center_auto_archive",
-                )
-                _stage_transactional_audit(
-                    session,
-                    team_id=group.team_id,
-                    actor=actor,
-                    action="data_center_delivery_package_requested",
-                    entity_type="material_group",
-                    entity_id=group.id,
-                    payload=_data_center_audit_payload(
-                        source_page=source_page,
-                        actor=actor,
-                        reason="data_center_auto_archive",
-                        before={"archive_status": "pending"},
-                        after={
-                            "archive_status": "archived",
-                            "delivery_package_job_status": package_status,
-                        },
-                        group_id=str(group.legacy_id or group.id),
-                    ),
-                )
             after = {
                 "category": str(photo.category or ""),
                 "archive_status": str(photo.archive_status or ""),
@@ -9033,18 +9005,17 @@ class PostgresStateRepository(StateRepository):
                     after=after,
                     group_id=str(group.legacy_id or group.id),
                     photo_id=str(photo.legacy_id or photo.id),
-                    auto_archived=should_enqueue,
+                    auto_archived=False,
                 ),
             )
             session.commit()
             session.refresh(photo)
             if not group_payload:
-                group_payload = _group_payload(session, group, verification=verification)
+                group_payload = _group_payload(session, group)
         return _data_center_group_result(
             group_payload,
             changed_fields=["photo.category"],
-            delivery_package_job_status=package_status,
-            archive_result={"archived": should_enqueue, "group_id": group_id},
+            archive_result={"archived": False, "group_id": group_id, "reason": "manual_archive_required"},
         )
 
     def rescan_data_center_group_photo_barcode(
@@ -9188,28 +9159,49 @@ class PostgresStateRepository(StateRepository):
             source_page=source_page,
             require_claim=False,
         )
-        from app.services.barcode_maintenance_worker import auto_archive_verified_group
-        from app.services.delivery_package_queue import DeliveryPackageNotReady
-
-        archive_result = auto_archive_verified_group(group_id, actor=actor)
         group_payload = self.get_group(group_id) or {}
-        package_status = ""
-        if archive_result.get("archived") or _data_center_archive_status(group_payload) == "archived":
-            try:
-                self.request_final_delivery_export(
-                    task_id=int(group_payload.get("task_id") or 0) or None,
-                    terminal=str(group_payload.get("terminal") or ""),
-                    review_scope="reviewed",
-                    requested_by=actor,
-                )
-                package_status = "ready"
-            except DeliveryPackageNotReady as exc:
-                package_status = exc.status
         return _data_center_group_result(
             group_payload,
-            delivery_package_job_status=package_status,
-            archive_result=archive_result,
+            archive_result={"archived": False, "group_id": group_id, "reason": "manual_archive_required"},
         )
+
+    def manual_archive_data_center_group(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        system_first_pass = source_page == "system_first_pass_archive"
+        reason_text = "首轮系统归档" if system_first_pass else "审阅工作台手动归档"
+        audit_action = "data_center_group_first_pass_archived" if system_first_pass else "data_center_group_manually_archived"
+        result = self.bulk_archive_groups([group_id], actor=actor, reason=reason_text)
+        if not result["archived_count"]:
+            reason = str((result.get("skipped") or [{}])[0].get("reason") or "不满足归档条件")
+            raise ValueError(f"当前终端不能归档：{reason}")
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            payload = _group_payload(session, group, include_photos=True)
+            _stage_transactional_audit(
+                session,
+                team_id=group.team_id,
+                actor=actor,
+                action=audit_action,
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data={"archive_status": "unarchived"},
+                after_data={"archive_status": "archived"},
+                payload=_data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason_text,
+                    before={"archive_status": "unarchived"},
+                    after={"archive_status": "archived"},
+                    group_id=str(group.legacy_id or group.id),
+                ),
+            )
+            session.commit()
+        return _data_center_group_result(payload, archive_result={"archived": True, "group_id": group_id})
 
     def finalize_unmatched_to_group(
         self,
@@ -12425,6 +12417,10 @@ class PostgresStateRepository(StateRepository):
                     skipped.append({"group_id": group_id, "reason": "no_active_photos"})
                     continue
                 before = _group_payload(session, group, include_photos=True)
+                eligibility = data_center_service.archive_eligibility_from_group(before)
+                if not eligibility["ready"]:
+                    skipped.append({"group_id": group_id, "reason": "; ".join(eligibility["blockers"])})
+                    continue
                 group_context = _group_barcode_context(group)
                 for photo in photos:
                     raw = dict(photo.raw_data or {})
@@ -12463,29 +12459,22 @@ class PostgresStateRepository(StateRepository):
                     )
                     photo.raw_data = raw
 
-                validation_group = _group_payload(session, group, include_photos=True)
-                reasons = local_simulation.validate_group_archive(validation_group)
                 raw_data = dict(group.raw_data or {})
-                group.exception_reasons = reasons
-                group.has_archive_blocker = bool(reasons)
-                group.exception_status = "open" if reasons else None
-                raw_data["exception_reasons"] = reasons
+                group.exception_reasons = []
+                group.has_archive_blocker = False
+                group.exception_status = None
+                raw_data["exception_reasons"] = []
                 raw_data["bulk_archive_reason"] = reason.strip()
-                if reasons:
-                    group.status = GroupStatus.REJECTED
-                    group.exception_note = "; ".join(local_simulation.display_exception_reasons(reasons))
-                    raw_data["status"] = "exception"
-                    raw_data["exception_note"] = group.exception_note
-                else:
-                    group.status = GroupStatus.APPROVED
-                    group.reviewer = actor
-                    group.review_note = "批量归档"
-                    group.exception_note = ""
-                    group.reviewed_at = now
-                    raw_data["status"] = "approved"
-                    raw_data["reviewer"] = actor
-                    raw_data["review_note"] = group.review_note
-                    raw_data["exception_note"] = ""
+                group.status = GroupStatus.APPROVED
+                group.reviewer = actor
+                group.review_note = "批量归档"
+                group.exception_note = ""
+                group.reviewed_at = now
+                raw_data["status"] = "approved"
+                raw_data["archive_status"] = "archived"
+                raw_data["reviewer"] = actor
+                raw_data["review_note"] = group.review_note
+                raw_data["exception_note"] = ""
                 group.raw_data = raw_data
                 invalidate_verification_for_group(
                     session,
@@ -12499,8 +12488,7 @@ class PostgresStateRepository(StateRepository):
                     actor=actor,
                     reason="bulk_archive_completed",
                 )
-                if not reasons:
-                    approved_group_ids.append(str(group.legacy_id or group.id))
+                approved_group_ids.append(str(group.legacy_id or group.id))
                 archived_groups.append(group)
                 _stage_transactional_audit(
                     session,
@@ -13069,6 +13057,15 @@ class DualWriteStateRepository(JsonStateRepository):
         photo_ids: list[str],
     ) -> dict[str, Any]:
         self._reject_uncoordinated_dual_write("manual_confirm_group_barcode")
+
+    def manual_archive_data_center_group(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        self._reject_uncoordinated_dual_write("manual_archive_data_center_group")
 
     def finalize_unmatched_to_group(
         self,

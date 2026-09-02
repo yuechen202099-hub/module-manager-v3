@@ -2,10 +2,6 @@ export type DataCenterDrilldownKind =
   | 'groups'
   | 'scanned_groups'
   | 'archived_groups'
-  | 'barcode_eligible'
-  | 'barcode_passed'
-  | 'barcode_manual_queue'
-  | 'barcode_ineligible'
   | 'unmatched_records'
   | 'exception_missing_photo'
   | 'unconstructed_unscanned'
@@ -54,18 +50,6 @@ const BUILDERS: Record<
   groups: () => ({ ...BASE_GROUP_QUERY }),
   scanned_groups: () => ({ ...BASE_GROUP_QUERY, has_photos: '1' }),
   archived_groups: () => ({ ...BASE_GROUP_QUERY, archive_status: 'archived' }),
-  barcode_eligible: () => ({ ...BASE_GROUP_QUERY, barcode_eligibility: 'eligible' }),
-  barcode_passed: () => ({
-    ...BASE_GROUP_QUERY,
-    barcode_eligibility: 'eligible',
-    barcode_status: 'verified',
-  }),
-  barcode_manual_queue: () => ({
-    ...BASE_GROUP_QUERY,
-    barcode_eligibility: 'eligible',
-    barcode_status: 'needs_review',
-  }),
-  barcode_ineligible: () => ({ ...BASE_GROUP_QUERY, barcode_eligibility: 'ineligible' }),
   unmatched_records: () => ({ data_type: 'unmatched' }),
   exception_missing_photo: () => ({ ...BASE_GROUP_QUERY, exception_status: 'open' }),
   unconstructed_unscanned: () => ({ ...BASE_GROUP_QUERY, construction_status: 'unconstructed' }),
