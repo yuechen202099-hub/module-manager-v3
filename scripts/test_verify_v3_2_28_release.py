@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_28_release.py"
 DATA_CENTER_UI_VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_0_data_center_ui.py"
+DASHBOARD_DRILLDOWN_VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_0_dashboard_drilldown.py"
 
 
 def load_script(path: Path, module_name: str):
@@ -58,6 +59,18 @@ def test_v3228_current_source_candidate_passes_its_release_contract() -> None:
 def test_data_center_ui_gate_matches_retired_barcode_contract() -> None:
     result = subprocess.run(
         [sys.executable, str(DATA_CENTER_UI_VERIFIER_PATH)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_dashboard_drilldown_gate_matches_retired_barcode_contract() -> None:
+    result = subprocess.run(
+        [sys.executable, str(DASHBOARD_DRILLDOWN_VERIFIER_PATH)],
         cwd=ROOT,
         text=True,
         capture_output=True,
