@@ -72,6 +72,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_27_release.py",
     "scripts/verify_v3_2_28_release.py",
     "scripts/test_verify_v3_2_28_release.py",
+    "scripts/verify_v3_2_29_release.py",
+    "scripts/test_verify_v3_2_29_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -159,6 +161,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.26.md",
     "ops/releases/V3.2.27.md",
     "ops/releases/V3.2.28.md",
+    "ops/releases/V3.2.29.md",
 )
 
 REQUIRED_FILES = [
@@ -995,6 +998,31 @@ def deployed_release_record_is_verified(record: str, version: str) -> None:
             )
         ):
             return
+    if version == "V3.2.28":
+        expected = {
+            "Status": "attested",
+            "Local Verification": "passed",
+            "Package": "passed",
+            "Production Deployment": "passed",
+            "Production Reconciliation": "passed",
+            "Attestation": "passed",
+        }
+        values = release_record_lifecycle_values(record, tuple(expected))
+        if all(
+            len(values[field]) == 1
+            and normalize_text(values[field][0]).strip() == normalize_text(expected_value)
+            for field, expected_value in expected.items()
+        ) and all(
+            marker in record
+            for marker in (
+                "- Source commit: a095c7fd0fd90f1e9cb79705f937bbd689b81002",
+                "- SHA256: 6734fae8c0c6fd5168d675effb3e8458ee5dd9bff53c359a9c8b555df8f04225",
+                "- Server SHA256: 6734fae8c0c6fd5168d675effb3e8458ee5dd9bff53c359a9c8b555df8f04225",
+                "- Local health: HTTP 200 version 3.2.28",
+                "- Public health: HTTP 200 version 3.2.28",
+            )
+        ):
+            return
     uses_structured_lifecycle = validate_structured_deployed_lifecycle_fields(record, version)
     if uses_structured_lifecycle and structured_deployed_release_record_has_verified_evidence(
         record, version
@@ -1318,6 +1346,9 @@ def verify_current_release_phase(
     if candidate == "V3.2.28":
         path = Path(__file__).with_name("verify_v3_2_28_release.py")
         module_name = "verify_v3_2_28_release"
+    elif candidate == "V3.2.29":
+        path = Path(__file__).with_name("verify_v3_2_29_release.py")
+        module_name = "verify_v3_2_29_release"
     elif candidate == "V3.2.27":
         path = Path(__file__).with_name("verify_v3_2_27_release.py")
         module_name = "verify_v3_2_27_release"
@@ -1381,7 +1412,7 @@ def verify_current_release_phase(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     verifier_args = ["--phase", phase]
-    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21", "V3.2.22", "V3.2.23", "V3.2.24", "V3.2.25", "V3.2.26", "V3.2.27", "V3.2.28"}:
+    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21", "V3.2.22", "V3.2.23", "V3.2.24", "V3.2.25", "V3.2.26", "V3.2.27", "V3.2.28", "V3.2.29"}:
         if package_path is not None:
             verifier_args.extend(("--package", str(package_path)))
         if expected_source_commit is not None:

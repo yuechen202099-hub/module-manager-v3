@@ -263,7 +263,13 @@ def validate_image_content(content: bytes, content_type: str = "", source: str =
 
     if content.startswith(b"\xff\xd8"):
         if not content.rstrip().endswith(b"\xff\xd9"):
-            raise ValueError(f"{source} jpeg is incomplete")
+            if b"\xff\xd9" not in content:
+                raise ValueError(f"{source} jpeg is incomplete")
+            try:
+                with Image.open(BytesIO(content)) as image:
+                    image.load()
+            except Exception as exc:
+                raise ValueError(f"{source} jpeg is incomplete") from exc
         return
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         if b"IEND" not in content[-32:]:

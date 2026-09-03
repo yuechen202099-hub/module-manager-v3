@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.29',
+    date: '2026-09-03',
+    type: 'BUG 修复',
+    title: '微信 JPEG 上传替换兼容修复',
+    items: [
+      '允许完整 JPEG 在结束标记后保留微信等应用附加数据，解决上传替换误报 jpeg is incomplete。',
+      '真正缺少结束标记、截断或无法完整解码的图片仍会被拒绝。',
+      '仅异常 JPEG 触发额外完整解码，正常上传继续使用快速校验路径。',
+    ],
+  },
+  {
     version: 'V3.2.28',
     date: '2026-09-02',
     type: 'BUG 修复',

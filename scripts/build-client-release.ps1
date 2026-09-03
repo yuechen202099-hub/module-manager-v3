@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.28",
+    [string]$Version = "3.2.29",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -9,13 +9,13 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw "Release Version must be a semantic version such as 3.0.84."
 }
-$requiredVersion = "3.2.28"
-$protectedHistoricalVersion = "3.2.27"
+$requiredVersion = "3.2.29"
+$protectedHistoricalVersion = "3.2.28"
 if ($Version -eq $protectedHistoricalVersion) {
-    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.28."
+    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.29."
 }
 if ($Version -ne $requiredVersion) {
-    throw "Refusing to build release version $Version. Expected exactly 3.2.28."
+    throw "Refusing to build release version $Version. Expected exactly 3.2.29."
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -79,6 +79,8 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_27_release.py",
     "scripts\verify_v3_2_28_release.py",
     "scripts\test_verify_v3_2_28_release.py",
+    "scripts\verify_v3_2_29_release.py",
+    "scripts\test_verify_v3_2_29_release.py",
     "scripts\verify_material_export_gate.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
@@ -179,7 +181,8 @@ $releaseInputs = @(
     "ops\releases\V3.2.25.md",
     "ops\releases\V3.2.26.md",
     "ops\releases\V3.2.27.md",
-    "ops\releases\V3.2.28.md"
+    "ops\releases\V3.2.28.md",
+    "ops\releases\V3.2.29.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -192,8 +195,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
 }
 $sourceBranch = (& git branch --show-current).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.28") {
-    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.28."
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.29") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.29."
 }
 $worktreeChanges = @(
     git status --porcelain --untracked-files=all |
@@ -275,7 +278,7 @@ if ($performanceReportPath) {
     }
 }
 
-Write-Host "Running V3.2.28 focused release gates..."
+Write-Host "Running V3.2.29 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -284,23 +287,23 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
     "scripts\verify_material_export_gate.py",
-    "scripts\verify_v3_2_28_release.py"
+    "scripts\verify_v3_2_29_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
-    if ($releaseVerifier -eq "scripts\verify_v3_2_28_release.py") {
+    if ($releaseVerifier -eq "scripts\verify_v3_2_29_release.py") {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier) --phase source
     } else {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.28 release gate failed: $releaseVerifier"
+        throw "V3.2.29 release gate failed: $releaseVerifier"
     }
 }
 
-Write-Host "Running V3.2.28 complete release contract regression..."
-& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_28_release.py .\scripts\test_verify_client_release.py .\scripts\test_verify_release_sop.py -q
+Write-Host "Running V3.2.29 complete release contract regression..."
+& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_29_release.py .\scripts\test_verify_client_release.py .\scripts\test_verify_release_sop.py -q
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.2.28 complete release contract regression failed."
+    throw "V3.2.29 complete release contract regression failed."
 }
 
 & .\.venv\Scripts\python.exe -m pytest .\v2-api\tests\test_collector_transfer_scale.py -q
@@ -503,6 +506,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_27_release.py" "scripts\verify_v3_2_27_rel
 Copy-ReleaseItem "scripts\test_verify_v3_2_27_release.py" "scripts\test_verify_v3_2_27_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_28_release.py" "scripts\verify_v3_2_28_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_28_release.py" "scripts\test_verify_v3_2_28_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_29_release.py" "scripts\verify_v3_2_29_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_29_release.py" "scripts\test_verify_v3_2_29_release.py"
 Copy-ReleaseItem "scripts\verify_material_export_gate.py" "scripts\verify_material_export_gate.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
@@ -749,10 +754,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "Release package verification failed."
 }
 
-& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_28_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
+& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_29_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
 if ($LASTEXITCODE -ne 0) {
     Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
-    throw "V3.2.28 source-bound package verification failed."
+    throw "V3.2.29 source-bound package verification failed."
 }
 
 Write-Host ""

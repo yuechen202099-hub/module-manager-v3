@@ -3,12 +3,34 @@ from __future__ import annotations
 import socket
 import urllib.error
 import urllib.request
+from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
+from PIL import Image
 
 from app.services import photo_storage
+
+
+def _make_jpeg_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), color="white").save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def test_validate_image_content_accepts_decodable_jpeg_with_trailing_app_data() -> None:
+    content = _make_jpeg_bytes() + b"WECHAT_TRAILER"
+
+    photo_storage.validate_image_content(content, "image/jpeg", "wechat-photo.jpg")
+
+
+def test_validate_image_content_rejects_jpeg_missing_end_marker() -> None:
+    content = _make_jpeg_bytes()
+    assert content.endswith(b"\xff\xd9")
+
+    with pytest.raises(ValueError, match="jpeg is incomplete"):
+        photo_storage.validate_image_content(content[:-2], "image/jpeg", "truncated-photo.jpg")
 
 
 class _PublicPeerSocket:
