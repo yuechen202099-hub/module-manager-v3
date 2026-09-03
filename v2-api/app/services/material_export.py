@@ -18,6 +18,7 @@ from app.domain.material_export import (
     MaterialExportIssue,
     MaterialExportMeter,
     collector_demand,
+    normalize_business_no,
     preflight_fingerprint,
     project_module_issues,
     required_meter_issues,
@@ -789,63 +790,153 @@ class PostgresMaterialExportService:
         total_shortage = sum(row.pool_shortage for row in rows.values())
         return replace(preflight, terminals=rows, total_pool_shortage=total_shortage)
 
-    def list_terminal_summaries(
-        self, *, task_ids: Sequence[str]
-    ) -> tuple[TerminalMaterialExportSummary, ...]:
-        tasks = self._owned_tasks(task_ids, lock=False)
-        settings = self._settings(tasks)
-        project_ids = {task.project_id for task in tasks}
-        evidence_by_project = {
-            project_id: self._load_project_evidence(project_id) for project_id in project_ids
+    def _summary_source_collector_counts(
+        self, tasks: Sequence[Task]
+    ) -> dict[UUID, int]:
+        task_ids = [task.id for task in tasks]
+        active_photo_groups: set[UUID] = set()
+        photo_collector_by_group: dict[UUID, str] = {}
+        photo_statement = (
+            select(Photo.group_id, Photo.collector)
+            .join(MaterialGroup, MaterialGroup.id == Photo.group_id)
+            .where(
+                Photo.team_id == self.team_id,
+                MaterialGroup.team_id == self.team_id,
+                MaterialGroup.task_id.in_(task_ids),
+                Photo.is_active.is_(True),
+            )
+            .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+            .execution_options(yield_per=1_000)
+        )
+        for row in self.session.execute(photo_statement):
+            active_photo_groups.add(row.group_id)
+            collector_no = normalize_business_no(row.collector)
+            if collector_no and row.group_id not in photo_collector_by_group:
+                photo_collector_by_group[row.group_id] = collector_no
+
+        collectors_by_task: dict[UUID, set[str]] = defaultdict(set)
+        collector_keys = (
+            "collector",
+            "采集器",
+            "采集器号",
+            "construction_collector",
+        )
+        group_statement = (
+            select(
+                MaterialGroup.id,
+                MaterialGroup.task_id,
+                MaterialGroup.raw_data,
+                MaterialGroup.photo_count,
+            )
+            .where(
+                MaterialGroup.team_id == self.team_id,
+                MaterialGroup.task_id.in_(task_ids),
+            )
+            .order_by(MaterialGroup.id)
+            .execution_options(yield_per=1_000)
+        )
+        for row in self.session.execute(group_statement):
+            if row.task_id is None:
+                continue
+            if max(0, int(row.photo_count or 0)) <= 0 and row.id not in active_photo_groups:
+                continue
+            collector_no = photo_collector_by_group.get(row.id, "")
+            if not collector_no and isinstance(row.raw_data, Mapping):
+                collector_no = next(
+                    (
+                        normalize_business_no(row.raw_data.get(key))
+                        for key in collector_keys
+                        if normalize_business_no(row.raw_data.get(key))
+                    ),
+                    "",
+                )
+            if collector_no:
+                collectors_by_task[row.task_id].add(collector_no)
+        return {task_id: len(values) for task_id, values in collectors_by_task.items()}
+
+    def _summary_active_allocation_counts(
+        self, tasks: Sequence[Task]
+    ) -> dict[UUID, int]:
+        task_ids = [task.id for task in tasks]
+        return {
+            task_id: int(count or 0)
+            for task_id, count in self.session.execute(
+                select(
+                    MaterialExportTerminal.task_id,
+                    func.count(MaterialExportCollectorAllocation.id),
+                )
+                .join(
+                    MaterialExportCollectorAllocation,
+                    MaterialExportTerminal.id
+                    == MaterialExportCollectorAllocation.terminal_export_id,
+                )
+                .where(
+                    MaterialExportTerminal.team_id == self.team_id,
+                    MaterialExportTerminal.task_id.in_(task_ids),
+                    MaterialExportCollectorAllocation.status.in_(("reserved", "used")),
+                )
+                .group_by(MaterialExportTerminal.task_id)
+            ).all()
         }
+
+    def _summary_last_job_statuses(
+        self, tasks: Sequence[Task]
+    ) -> dict[UUID, str]:
+        task_ids = [task.id for task in tasks]
+        rows = self.session.execute(
+            select(MaterialExportTerminal.task_id, MaterialExportJob.status)
+            .join(
+                MaterialExportJob,
+                MaterialExportTerminal.job_id == MaterialExportJob.id,
+            )
+            .where(
+                MaterialExportTerminal.team_id == self.team_id,
+                MaterialExportTerminal.task_id.in_(task_ids),
+            )
+            .order_by(
+                MaterialExportTerminal.task_id,
+                MaterialExportJob.created_at.desc(),
+                MaterialExportJob.id.desc(),
+            )
+        ).all()
+        statuses: dict[UUID, str] = {}
+        for task_id, status in rows:
+            statuses.setdefault(task_id, normalize_identifier(status))
+        return statuses
+
+    def _terminal_summaries_for_tasks(
+        self,
+        tasks: Sequence[Task],
+        settings: Mapping[str, TerminalExportSetting],
+    ) -> tuple[TerminalMaterialExportSummary, ...]:
+        source_counts = self._summary_source_collector_counts(tasks)
+        active_counts = self._summary_active_allocation_counts(tasks)
+        last_statuses = self._summary_last_job_statuses(tasks)
         results: list[TerminalMaterialExportSummary] = []
         for task in tasks:
             task_id = str(task.id)
             external_task_id = external_material_export_task_id(task)
-            meters = tuple(
-                item
-                for item in evidence_by_project[task.project_id].meters
-                if item.constructed and item.task_id == task_id
-            )
-            demand = collector_demand(meters, _setting_count(settings.get(task_id)))
-            active_count = int(
-                self.session.scalar(
-                    select(func.count(MaterialExportCollectorAllocation.id))
-                    .join(
-                        MaterialExportTerminal,
-                        MaterialExportTerminal.id
-                        == MaterialExportCollectorAllocation.terminal_export_id,
-                    )
-                    .where(
-                        MaterialExportTerminal.task_id == task.id,
-                        MaterialExportCollectorAllocation.status.in_(("reserved", "used")),
-                    )
-                )
-                or 0
-            )
-            last_status = self.session.scalar(
-                select(MaterialExportJob.status)
-                .join(
-                    MaterialExportTerminal,
-                    MaterialExportTerminal.job_id == MaterialExportJob.id,
-                )
-                .where(MaterialExportTerminal.task_id == task.id)
-                .order_by(MaterialExportJob.created_at.desc())
-                .limit(1)
-            )
+            requested_count = _setting_count(settings.get(task_id))
+            source_count = source_counts.get(task.id, 0)
             results.append(
                 TerminalMaterialExportSummary(
                     task_id=external_task_id,
                     project_id=str(task.project_id),
                     terminal_code=normalize_identifier(task.terminal),
-                    requested_collector_count=_setting_count(settings.get(task_id)),
-                    source_collector_count=len(demand.source_collector_nos),
-                    final_collector_count=demand.final_count,
-                    active_allocation_count=active_count,
-                    last_job_status=normalize_identifier(last_status),
+                    requested_collector_count=requested_count,
+                    source_collector_count=source_count,
+                    final_collector_count=max(source_count, requested_count),
+                    active_allocation_count=active_counts.get(task.id, 0),
+                    last_job_status=last_statuses.get(task.id, ""),
                 )
             )
         return tuple(results)
+
+    def list_terminal_summaries(
+        self, *, task_ids: Sequence[str]
+    ) -> tuple[TerminalMaterialExportSummary, ...]:
+        tasks = self._owned_tasks(task_ids, lock=False)
+        return self._terminal_summaries_for_tasks(tasks, self._settings(tasks))
 
     def set_requested_collector_count(
         self, *, task_id: str, count: int
@@ -894,7 +985,9 @@ class PostgresMaterialExportService:
             )
         )
         self.session.flush()
-        return self.list_terminal_summaries(task_ids=(str(task.id),))[0]
+        return self._terminal_summaries_for_tasks(
+            (task,), {str(task.id): setting}
+        )[0]
 
     def _active_export_allocations(
         self, project_id: UUID

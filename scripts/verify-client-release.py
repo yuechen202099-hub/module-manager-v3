@@ -401,6 +401,7 @@ V3228_CONTRACT_INPUTS = frozenset(
         "ops/releases/V3.2.28.md",
         "scripts/verify_v3_2_28_release.py",
         "scripts/test_verify_v3_2_28_release.py",
+        "v2-web/src/api/__tests__/materialExportSummaries.spec.ts",
     }
 )
 

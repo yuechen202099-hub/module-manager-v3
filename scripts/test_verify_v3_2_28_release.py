@@ -43,7 +43,11 @@ def test_v3228_release_contract_covers_export_containment() -> None:
     assert verifier.MIGRATION_REVISION == "20260901_0017"
     assert {
         "v2-api/app/api/routes/material_exports.py",
+        "v2-api/app/services/material_export.py",
         "v2-api/tests/test_material_export_api.py",
+        "v2-api/tests/test_material_export_service.py",
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/__tests__/materialExportSummaries.spec.ts",
         "v2-web/src/views/ClaimTasksView.vue",
         "v2-web/src/views/__tests__/ClaimTasksMaterialExport.spec.ts",
         "ops/releases/V3.2.28.md",
@@ -160,6 +164,7 @@ def test_generic_package_verifier_supports_v3228_contract_inputs() -> None:
     assert "scripts/verify_v3_2_28_release.py" in required
     assert "scripts/test_verify_v3_2_28_release.py" in required
     assert "ops/releases/V3.2.28.md" in required
+    assert "v2-web/src/api/__tests__/materialExportSummaries.spec.ts" in required
     assert generic.forbidden_files_for_version("3.2.28") == generic.V3226_RETIRED_BACKGROUND_BARCODE_FILES
 
 

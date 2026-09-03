@@ -109,6 +109,23 @@ describe('ClaimTasksView material export integration', () => {
     constructor.unmount()
   })
 
+  it('does not reload export summaries when an unrelated data refresh reloads tasks', async () => {
+    const wrapper = mount(ClaimTasksView, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    expect(apiMock.fetchTaskSnapshot).toHaveBeenCalledTimes(1)
+    expect(apiMock.fetchMaterialExportSummaries).toHaveBeenCalledTimes(1)
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'module-manager:data-refresh', reason: 'construction-heartbeat' },
+    }))
+    await flushPromises()
+
+    expect(apiMock.fetchTaskSnapshot).toHaveBeenCalledTimes(2)
+    expect(apiMock.fetchMaterialExportSummaries).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
   it('keeps the collector quantity setting disabled only for a completely unconstructed terminal', async () => {
     apiMock.fetchTaskSnapshot.mockResolvedValue({
       teamId: 'team-a',

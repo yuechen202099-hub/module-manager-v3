@@ -4,8 +4,22 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.domain.material_export import MaterialExportMeter
+from app.models import (
+    MaterialGroup,
+    Photo,
+    Project,
+    ProjectStatus,
+    Task,
+    Team,
+    TerminalExportSetting,
+)
 from app.services.material_export import (
     MaterialExportAllocationResult,
     MaterialExportBusy,
@@ -14,10 +28,18 @@ from app.services.material_export import (
     MaterialExportLeaseMismatch,
     MaterialExportPoolShortage,
     MaterialExportProjectMismatch,
+    PostgresMaterialExportService,
     ProjectExportEvidence,
     build_preflight,
     external_material_export_task_id,
 )
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_as_json(
+    _type: JSONB, _compiler: object, **_kwargs: object
+) -> str:
+    return "JSON"
 
 
 def meter(
@@ -182,3 +204,124 @@ def test_terminal_summary_uses_the_task_id_exposed_by_task_dispatch() -> None:
     assert external_material_export_task_id(
         SimpleNamespace(id=task_id, legacy_id=None)
     ) == str(task_id)
+
+
+def test_terminal_summaries_batch_queries_and_preserve_collector_counts(tmp_path) -> None:
+    """Catches project-wide ORM loading or per-terminal summary SQL queries."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'summaries.sqlite3'}")
+
+    @event.listens_for(engine, "connect")
+    def register_uuid_function(connection, _connection_record) -> None:
+        connection.create_function("gen_random_uuid", 0, lambda: uuid4().hex)
+
+    Base.metadata.create_all(engine)
+    project_id = uuid4()
+    task_ids = [uuid4() for _ in range(12)]
+    group_ids = [uuid4() for _ in task_ids]
+    with engine.begin() as connection:
+        connection.execute(
+            Team.__table__.insert(), {"id": "team-a", "name": "摘要性能测试团队"}
+        )
+        connection.execute(
+            Project.__table__.insert(),
+            {
+                "id": project_id,
+                "team_id": "team-a",
+                "code": "P-SUMMARY",
+                "name": "摘要性能测试项目",
+                "status": ProjectStatus.ACTIVE,
+                "settings": {},
+            },
+        )
+        connection.execute(
+            Task.__table__.insert(),
+            [
+                {
+                    "id": task_id,
+                    "team_id": "team-a",
+                    "legacy_id": 1000 + index,
+                    "terminal": f"T-{index:02d}",
+                    "project_id": project_id,
+                    "title": f"终端 {index:02d}",
+                    "raw_data": {},
+                }
+                for index, task_id in enumerate(task_ids)
+            ],
+        )
+        connection.execute(
+            MaterialGroup.__table__.insert(),
+            [
+                {
+                    "id": group_id,
+                    "team_id": "team-a",
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "terminal": f"T-{index:02d}",
+                    "meter_match_key": f"M-{index:02d}",
+                    "display_meter_no": f"M-{index:02d}",
+                    "installation_address": f"测试地址 {index:02d}",
+                    "photo_count": 1,
+                    "raw_data": {},
+                }
+                for index, (task_id, group_id) in enumerate(zip(task_ids, group_ids))
+            ],
+        )
+        connection.execute(
+            Photo.__table__.insert(),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": "team-a",
+                    "group_id": group_id,
+                    "sha256": f"{index + 1:064x}",
+                    "object_key": f"summary/{index:02d}.jpg",
+                    "category": "module_meter",
+                    "collector": f"C-{index:02d}",
+                    "asset_no": f"MOD-{index:02d}",
+                    "sort_order": 0,
+                    "is_active": True,
+                    "metadata_json": {},
+                    "raw_data": {},
+                }
+                for index, group_id in enumerate(group_ids)
+            ],
+        )
+        connection.execute(
+            TerminalExportSetting.__table__.insert(),
+            {
+                "id": uuid4(),
+                "team_id": "team-a",
+                "project_id": project_id,
+                "task_id": task_ids[0],
+                "terminal_code": "T-00",
+                "requested_collector_count": 3,
+                "updated_by_username": "admin",
+            },
+        )
+
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        with sessionmaker(engine, expire_on_commit=False)() as session:
+            rows = PostgresMaterialExportService(
+                session,
+                team_id="team-a",
+                actor_id=None,
+                actor="admin",
+            ).list_terminal_summaries(task_ids=[str(1000 + index) for index in range(12)])
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+    by_task_id = {row.task_id: row for row in rows}
+    assert len(rows) == 12
+    assert by_task_id["1000"].source_collector_count == 1
+    assert by_task_id["1000"].requested_collector_count == 3
+    assert by_task_id["1000"].final_collector_count == 3
+    assert all(row.source_collector_count == 1 for row in rows)
+    assert len(statements) <= 6

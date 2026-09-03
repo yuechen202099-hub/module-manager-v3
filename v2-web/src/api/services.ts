@@ -812,7 +812,11 @@ async function fetchWithAuth(path: string, init: RequestInit = {}) {
   return response
 }
 
-async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+type ApiRequestBehavior = {
+  emitMutation?: boolean
+}
+
+async function api<T>(path: string, init: RequestInit = {}, behavior: ApiRequestBehavior = {}): Promise<T> {
   const method = String(init.method || 'GET').toUpperCase()
   const response = await fetchWithAuth(path, {
     ...init,
@@ -825,7 +829,9 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok || payload.error) {
     throw createApiRequestError(response, payload)
   }
-  if (method !== 'GET' && method !== 'HEAD') emitDataMutated(`api:${method}:${path}`)
+  if (behavior.emitMutation !== false && method !== 'GET' && method !== 'HEAD') {
+    emitDataMutated(`api:${method}:${path}`)
+  }
   return payload.data as T
 }
 
@@ -3226,7 +3232,7 @@ export async function fetchMaterialExportSummaries(taskIds: string[]): Promise<M
   const rows = await api<any[]>('/material-exports/terminal-summaries', {
     method: 'POST',
     body: JSON.stringify({ task_ids: taskIds }),
-  })
+  }, { emitMutation: false })
   return rows.map((raw) => ({
     taskId: String(raw.task_id),
     projectId: String(raw.project_id || ''),

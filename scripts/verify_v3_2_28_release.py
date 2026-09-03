@@ -21,7 +21,7 @@ BASELINE_RELEASE_PATH = "ops/releases/V3.2.27.md"
 ARCHIVE_PATH = "build/server-release/module-manager-v2-server-3.2.28.zip"
 PRODUCTION_RECORD_SHA256 = "b34b32b2979c2c11acc79b69c22fbd2e51bf024d223fcc5f96d7181a8df32a59"
 CLAIM_TASKS_VIEW_PATH = "v2-web/src/views/ClaimTasksView.vue"
-CLAIM_TASKS_VIEW_SHA256 = "d663dc8e0179cc96e54107b221760465bb282c31ce99d01cdf7573a9179da804"
+CLAIM_TASKS_VIEW_SHA256 = "7bd3fd10dbe5a858203962ce1653c7e652d309d447a858e788a63a682de6186e"
 VERIFICATION_PHASES = frozenset(("source", "package", "attestation"))
 
 
@@ -45,6 +45,7 @@ REQUIRED_FILES = tuple(
             "scripts/test_verify_v3_2_28_release.py",
             "v2-api/app/api/routes/material_exports.py",
             "v2-api/tests/test_material_export_api.py",
+            "v2-web/src/api/__tests__/materialExportSummaries.spec.ts",
             "v2-web/src/views/ClaimTasksView.vue",
             "v2-web/src/views/__tests__/ClaimTasksMaterialExport.spec.ts",
         )

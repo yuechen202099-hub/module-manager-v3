@@ -209,11 +209,6 @@ async function loadTasks(force = false) {
     const snapshot = await fetchTaskSnapshot({ force, signal: request.signal })
     if (!request.isCurrent(taskMutationVersion)) return
     tasks.value = snapshot.items
-    if (isAdmin.value) {
-      void materialExport.loadSummaries(snapshot.items).catch((error) => {
-        materialExport.error.value = error instanceof Error ? error.message : '导出摘要加载失败'
-      })
-    }
   } catch (error) {
     if (isAbortError(error)) return
     if (!request.isCurrent(taskMutationVersion)) return
@@ -223,8 +218,23 @@ async function loadTasks(force = false) {
   }
 }
 
-function refreshTasks() {
-  void loadTasks(true)
+async function loadMaterialExportSummaries() {
+  if (!isAdmin.value) return
+  try {
+    await materialExport.loadSummaries(tasks.value)
+  } catch (error) {
+    materialExport.error.value = error instanceof Error ? error.message : '导出摘要加载失败'
+  }
+}
+
+async function loadInitialTasks() {
+  await loadTasks()
+  await loadMaterialExportSummaries()
+}
+
+async function refreshTasks() {
+  await loadTasks(true)
+  await loadMaterialExportSummaries()
 }
 
 function selectVisibleForExport(selected: boolean) {
@@ -345,7 +355,7 @@ function handleExternalRefresh(event: MessageEvent) {
 }
 
 onMounted(() => {
-  void loadTasks()
+  void loadInitialTasks()
   void loadAccounts()
   window.addEventListener('message', handleExternalRefresh)
   refreshInterval = window.setInterval(() => void loadTasks(true), TASK_STATUS_REFRESH_INTERVAL_MS)
