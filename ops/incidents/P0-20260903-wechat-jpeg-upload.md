@@ -30,18 +30,18 @@
 ## Fix
 
 - Branch: `production/V3/3.2.29`
-- Commit: pending
+- Commit: 3e02390502a77dceb226232a61e2eee82163bd31
 - Tests: JPEG 校验、上传替换接口、完整后端回归和发布契约
 - Review: 单线程差异与安全边界复核
 - Package: `build/server-release/module-manager-v2-server-3.2.29.zip`
-- SHA256: pending
+- SHA256: d579be3f89b49ab845a8098323880a90bdeabf9e2c851e345add3fafc2972a78
 
 ## Production Evidence
 
-- Backup directory: pending
-- Release directory: pending
-- Health check: pending
-- Page/API checks: pending
+- Backup directory: /opt/module-manager-v2/backups/V3.2.29-pre-20260903_214054
+- Release directory: /opt/module-manager-v2/releases/v3.2.29-20260903T134524Z
+- Health check: local and public HTTP 200, version 3.2.29
+- Page/API checks: key local/public pages returned HTTP 200; deployed JPEG validator accepted the reported trailing-data shape and still rejected missing EOI
 - Rollback target: V3.2.28
 
 ## Follow-Up
